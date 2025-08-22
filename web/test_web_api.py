@@ -4,7 +4,6 @@ Test script for the web interface
 """
 
 import requests
-import json
 
 def test_web_api():
     """Test the web API endpoints"""
