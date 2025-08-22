@@ -1,0 +1,696 @@
+Text‑Based Simulation Engine – Design Draft (v9)
+Simulation/Game name: Living Tapestry.
+1. Introduction
+Terminal‑only, text‑based life‑simulation engine powered by a single local Large Language Model (LLM). The LLM turns free‑text from the player and NPCs into structured commands that mutate a deterministic JSON world‑state.
+Scope = pure **simulation** (no action‑points). Target hardware = one GPU, one quantised LLM instance. Longer think‑times are acceptable in exchange for narrative richness.
+2. Core Technology Stack
+**Python 3.x** – event loop, mechanics, utilities.
+**LM Studio‑hosted LLM** – OpenAI‑compatible local endpoint. The game will also support an OpenRouter connection.
+**JSON files** – human‑readable storage for all entities and configs.
+**Optional curses / hex visualiser** – future board view.
+**python‑docx / Markdown** – documentation pipeline.
+3. Data Files & Schemas
+3.1 NPC Files  (npcs/<npc_id>.json)
+Each NPC lives in its own file named by an immutable UUID.
+`id` – string UUID primary key.
+`name` – display name.
+`inventory` – list of carried `item_id`s (backpack space).
+`slots` – equipment map `{main_hand, off_hand, head, torso, legs}`; values are `item_id` or `null`.
+`hp` – hit points.
+`memories` – [{text, priority, tick, status}].
+`goals` – same structure as memories.
+`relationships` – {npc_id: status}.
+`tags` – {inherent: [], dynamic: []}.
+Tag Definition Files  (tags/<tag_name>.json)
+Registry linking each tag to behaviour and numeric effects.
+3.2 Location Files
+Split files keep static flavour separate from mutable state.
+**<loc_id>_static.json** – description, tags, `hex_connections` (≤ 6).
+**<loc_id>_state.json** – occupants, items, sublocations, transient_effects, and `connections_state` for mutable doors/trapdoors `{neighbour_loc_id: {status: open|closed|locked}}`.
+3.3 Item Files
+Prototype vs instance pattern.
+`items/catalog.json` – item blueprints (`stats`, `interactions`, `weight`, `armour_rating`).
+`items/instances/<item_id>.json` – links to blueprint, current owner/location, dynamic tags.
+3.4 Player Sheet  (player/player.json)
+Schema mirrors NPC, stored separately for easy edits.
+3.5 LLM Config  (config/llm.json)
+`model`, `endpoint`, `max_context` (−1 = inherit LM Studio). The endpoint may point to LM Studio or an OpenRouter connection.
+4. Simulation Engine Workflow
+Turn loop with event queue: Player → NPCs → Event Processing → Tick Advance.
+4.1 Tool Catalogue
+Tools are plug‑and‑play Python classes implementing `get_llm_prompt_fragment`, `validate_intent`, `generate_events` (see §10.6).
+move – relocate to adjacent target hex/sublocation.
+attack – strike using `slots.main_hand` item or fists if item not present.
+talk / talk_loud / scream – normal or broadcast speech; affects conversations & sound.
+grab_inventory / grab_hand – pick up item to backpack or hand slot (weight check).
+interact – high‑power verb for item combinations; engine feeds the LLM the allowed verbs from `catalog.json` to avoid hallucinations.
+look, inventory, stats, analyze, bye – utility queries and polite exit.
+5. Systems
+5.1 Tag System
+Inherent vs dynamic tags with optional `expiry_tick`. Engine consults tag rules for automatic chain reactions (water + fire → remove burning, add wet).
+5.2 Strength & Heavy Items
+`weight` vs `strength` gates grabs and moves; overweight items convert to drag actions.
+5.3 Sound Propagation
+Events with `noise_level ≥ loud` spawn `SoundEvent`s in neighbour hexes. Closed/locked doors in `connections_state` reduce or block noise.
+5.4 Combat & Terrain Modifiers
+Combat is handled mostly like an rpg with stats like special weapon stats will roll more dices and pick the best one/s, better weapons are allowed to roll bigger dices or more of them for consistency depending on weapon types etc. Location tags inject deterministic modifiers (muddy: melee −1, speed −10 %). Armour uses `armour_rating` from equipped `slots`.
+5.5 Conversation Management
+`Conversation` object fields: `conversation_id`, participants, `turn_order`, `current_speaker`, topic, `start_tick`. LLM must specify optional `target_id` in talk payloads for directed speech.
+5.6  Hunger & Sustenance  — drop‑in mechanic
+Purpose 
+ Add a slow‑burn survival layer that rarely interrupts normal play, but creates long‑term stakes (e.g., sieges, long journeys).
+
+Data fields (stored in each NPC / player JSON)
+Field
+Type
+Notes
+last_meal_tick
+int
+Absolute game_tick when food was last consumed.
+hunger_stage (optional)
+"sated" | "hungry" | "starving"
+Redundant helper for quick UI checks.
+
+
+6. Time & Tick Management
+`game_tick` increments after Event Processing; durations rely on absolute ticks.
+7. Suggested Folder Layout
+```
+/ game_root
+├── data/
+│   ├── npcs/
+│   ├── locations/
+│   ├── items/
+│   ├── tags/
+│   └── world_state/
+├── engine/
+├── rpg/
+└── scripts/
+```
+8. Future Extensions
+Hex‑grid visualiser and visual interface.
+Weather & day/night
+Factions and faction reputation
+Procedural quest generator//not needed, the npcs will organically give out “Quests”, remember this is more simulation than game. It is a playable simulation kinda.
+9. Open Questions / To‑Do
+Fallback system: Prompt retryes fallback system, upon  detection of failure by the llm to structuryze, respond trying to apply or give make a tool use, try to pinpoint the intended tool it was trying to use and give a better prompt from a list of many different prompts for the tools until it gets it right.
+Multi‑actor conversation flow control. IMPORTANT!!
+Is it necessary or good to have weapon skills, martial arts skills and/or alikes? What would be best and how to handle it nicely?
+Skills as Tags: A skill is simply a tag with a name and a value/level. Store it in the NPC's tags.inherent list (or a new skills field if you prefer).
+Example: "skill_swords": "novice", "skill_archery": "expert", "unarmed_combat": "master"
+Mechanical Impact: When the attack tool generates a DAMAGE_APPLIED event, the handler function in your engine should:
+Check the weapon used in the attack (e.g., from slots.main_hand).
+Check the attacker's tags for a corresponding skill tag (e.g., if using a sword, look for skill_swords).
+Apply a deterministic bonus based on the skill level (e.g., novice = +1 to hit, expert = +1d4 to damage, master = re-roll misses once).
+LLM Awareness: The NPC's skills will be part of the character data fed into its prompt.
+Prompt fragment: "You are Gregor, an expert archer. You are cautious and prefer to strike from a distance."
+This allows the LLM to make in-character decisions (e.g., choosing to use a bow over a dagger) without needing to understand the underlying mechanics of the dice rolls.
+
+Should everyone get some sort of narration of theyr surroundings? Or something like this for better awareness? / No, Only the player should get prose narration. NPCs should "perceive" the world through structured data. This is a crucial distinction for engine stability. Proposed Solution: Perception Events:
+When an event happens (e.g., player drops a sword), the engine generates perception data for nearby actors.
+For the Player: The Narrator component (§10.3) translates this into prose: You see Bob drop his steel sword with a loud clatter.
+For an NPC: The engine adds a temporary, structured memory or perception-event to the NPC's data queue for their next "think" cycle: {event: "object_dropped", actor: "player_id", item: "item_sword_123", sound_level: "loud"}.
+When it's the NPC's turn to act, their prompt includes this structured data. The LLM can then reason about it: "Player dropped a weapon. My goal is to get a weapon. Therefore, my command is grab_inventory(item_sword_123)."
+This prevents the massive overhead and unreliability of having NPCs parse English narration.
+Some stuff is very complicated, llm should get a special tool to fall back on or tools for special or edje use cases that lets it decide outcome, like being able to modify a certain character json memories, inventory and stats or location or item or create a new one, etc. In case something unforeseen is being requested of the commands step and there is no tool for it, the downside is it needs some stages to not fail in the hands of the llm, like some sort of detection of what it intended and failed to do to select from a series of prompts to gide it better on what it wants to do and let it try again.
+This is a powerful but dangerous idea, often called a "meta-tool" or "god-tool". Your caution is well-founded. Direct mutation of JSON is risky.
+Proposed Solution: The Plan or Reason Tool.
+Instead of letting the LLM directly edit files, give it a tool that lets it declare an intent to change its own state.
+Tool: reason(thought: string, desired_outcome: dict)
+Example: The player convinces an NPC that their king is a traitor. The NPC can't just edit relationships. It would use the reason tool.
+LLM Output: reason(thought="The player provided convincing evidence about the king's betrayal. I no longer trust him.", desired_outcome={"update_relationship": {"target_id": "king_id", "new_status": "hated"}})
+Engine Handling: A special, high-scrutiny handler in your engine receives this. It validates the desired_outcome against a strict schema. It might only allow changes to memories, goals, and relationships, but not stats or inventory (which should require physical actions). If valid, the engine performs the state mutation.
+This provides a critical safety layer. The LLM requests a change, and the deterministic engine executes it if it's a valid type of change. Your idea to "guide it better on what it wants to do and let it try again" is a perfect fallback for when this validation fails.
+IMPORTANT!! : npc memory management: retrieval: When an NPC thinks, you can do a quick keyword or vector search on their long-term memories to pull relevant context into the prompt. E.g., if the player mentions a "dragon," the engine can find the memory [{tick: 5000, text: "A dragon attacked my village years ago."}] and add it to the context. 
+Core Memories: Use your reason tool or a dedicated reflect tool to create "core memories" or beliefs. E.g., The player is a trustworthy friend. These always get included in the prompt.
+Long term memory and short term memory management: TODO!!
+Working Memory (The Prompt): A temporary, per-turn buffer. Contains:
+Current Goal(s).
+Core Memories/Beliefs (see below).
+Recent PerceptionEvents (structured data about what just happened).
+Recent conversation lines.
+This is cleared and rebuilt every turn.
+Short-Term Memory (A RAM-cache): A list of the last ~20-50 full memories ({text, priority, tick}). When building the Working Memory, the engine can do a quick keyword search here first. This is much faster than searching the full LTM file.
+Long-Term Memory (The JSON file): The complete memories list on disk.
+Retrieval: Use Retrieval-Augmented Generation (RAG). When the LLM prompt is being built, the engine takes keywords from the current situation (e.g., player's name, location, topic of conversation) and uses them to pull the N-most relevant memories from the JSON file to inject into the prompt. A simple keyword search is good; a vector similarity search is even better if you want to get advanced.
+Consolidation: To prevent memory bloat, implement a "sleep" or "reflection" cycle (e.g., once per in-game day). During this cycle, you feed the NPC's recent memories to the LLM with a special prompt: "Summarize these recent events and reflections. Consolidate them into a few key new memories or update your core beliefs about the world." The LLM then uses your Reflect tool to add these new, higher-level summary memories and potentially mark the old, detailed ones for archival.
+status field: Consider defining this more explicitly. For example:
+status: "active" (A current goal), "recalled" (A memory brought into the current context), "archived" (An old memory, less likely to be retrieved), "consolidated" (A detail memory that has been summarized into a new, higher-level memory). This helps the memory management system.
+Of course. Here is the summary of the Action-Time System in a simple format for your document.
+
+10.8 The Action-Time System (Asynchronous Turns)
+Problem: The original "one action per tick" loop is unrealistic and gives rise to some problems. It means a quick phrase takes the same amount of simulation time as starting a lengthy task like chopping a tree, creating bottlenecks and breaking immersion.
+Solution: Decouple actor turns from the main game tick. Actions now have a time_cost, and actors act only when they are free, creating a fluid, asynchronous simulation.
+1. Key Data Changes:
+New Actor Field: Each NPC and the player gains a new field: next_available_tick: int. This stores the future game_tick when that actor will be free to perform their next action.
+Action Time Costs: Every action tool (e.g., talk, attack, chop,dig) has a defined time_cost in ticks. This is stored in a central config file.
+talk: low cost (e.g., 5 ticks)
+Dig_trench: high cost (e.g., 40 ticks)
+2. New Engine Workflow:
+The main loop is no longer round-robin. Instead, on every tick, the engine performs these steps:
+Advance Time: Increment game_tick by 1.
+Update Ongoing Tasks: Process progress for any ActiveAction (like chopping or crafting). This happens every tick, representing continuous work.
+Find Ready Actors: Identify all actors whose next_available_tick is less than or equal to the current game_tick.
+Get New Commands: Prompt only the "ready" actors (Player or NPC) for their next action. All other actors are considered "busy" with their previous action's cooldown.
+Execute & Set Cooldown: When a ready actor performs an action, the engine updates their status: actor.next_available_tick = game_tick + action.time_cost.
+Process Events: Handle all events generated this tick and repeat the loop.
+Benefit: This system ensures temporal consistency. A conversation can involve several quick, low-cost actions back-and-forth between two actors, while a third actor is occupied for many ticks performing a single, high-cost labor task in the background. The world feels alive and continuous, not turn-based.
+
+
+
+
+10. Advanced Implementation Roadmap
+10.1 Tool‑Generated Event Payloads
+Tools emit dicts `{event_type, tick, actor_id, target_ids?, payload}`. Handlers apply mechanics and may enqueue follow‑ups like DAMAGE_APPLIED.
+10.3 Narrator Component
+LLM transforms per‑tick event list into prose summary for the player, but player is not to be omniscient, just his andadsjacent maybe? Locations narration. 
+10.4 Dynamic Tag Rules Engine
+JSON‑driven rule file evaluated each tick to add/remove/negate tags based on conditions.
+10.5 Armour & Defensive Calculations
+During DAMAGE_APPLIED, engine references defender`s equipped armour in `slots` to mitigate damage by type.
+10.6 Tool Base Class
+Abstract class:
+`class Tool:`
+`    def get_llm_prompt_fragment(self) -> str: ...`
+`    def validate_intent(self, intent: dict) -> bool: ...`
+`    def generate_events(self, intent: dict) -> list[Event]: ...`
+New tools are added by subclassing, keeping engine core tidy.
+10.7 Verticality and Complex Structures (Walls & Gates)
+To handle multi-level structures like fortified walls, gates, and towers, the engine moves beyond a purely flat hex-grid by modeling verticality through a network of distinct, interconnected locations. This approach allows for complex tactical situations like ranged attacks from elevation, asymmetric access (stairs vs. climbing), and indirect communication.
+1. Core Principle: Verticality via Linked Locations
+A single structure like a gatehouse is not one location, but several. The ground level, the interior, and the ramparts on top are modeled as separate location files linked by special connections.
+Example Location Setup:
+village_gate_exterior_id: The hex outside the village.
+village_gate_interior_id: The hex just inside the gate.
+gatehouse_ramparts_id: The location on top of the wall/gate structure.
+Their static data defines their unique connections:
+locations/village_gate_interior_static.json
+Generated json
+     {
+  "description": "You are on the inside of the main gate. A set of stone stairs leads up to the ramparts.",
+  "hex_connections": {
+    "north": "village_gate_exterior_id", // The gate itself
+    "south": "market_square_id",
+    "up": "gatehouse_ramparts_id"      // Asymmetric access via stairs
+  }
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+locations/gatehouse_ramparts_static.json
+Generated json
+     {
+  "description": "You are on the stone ramparts above the main gate. You have a clear view of the road outside and the courtyard within. A heavy iron lever is set into the wall here.",
+  "tags": { "inherent": ["elevated_vantage_point"] },
+  "hex_connections": {
+    "down": "village_gate_interior_id" // Stairs leading back down
+  }
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+This setup creates asymmetric access: defenders can freely move between the interior and ramparts using the up/down connection. Attackers outside have no such connection and would need to use a different method (e.g., a climb action against a climb_difficulty attribute on the wall, or special items like a siege_ladder).
+2. Engine Mechanics for Verticality
+The engine uses tags and location adjacency to enable new mechanics:
+Enhanced Perception: The Perception system has a specific rule for the elevated_vantage_point tag. An actor in a location with this tag receives structured perception events (e.g., OBJECT_SEEN, SOUND_HEARD) from all vertically and horizontally adjacent locations, even if the direct path is blocked (like a closed gate). This allows a guard on the ramparts to see and hear activity outside the walls.
+Ranged Combat Advantage: The attack tool's handler checks for the elevated_vantage_point tag. An actor using a ranged weapon from such a location can target actors in adjacent ground-level locations and may receive deterministic bonuses (e.g., to-hit chance, ignoring cover).
+3. Interactive Mechanisms
+Mechanisms like levers or winches are modeled as interactive item instances or sublocations. They serve as a bridge between an actor's interact action and a change in the world state.
+items/instances/gate_lever_1.json
+Generated json
+     {
+  "blueprint_id": "gate_lever",
+  "current_location": "gatehouse_ramparts_id",
+  "tags": { "inherent": ["mechanism"] },
+  // Custom data payload for the interact handler
+  "controls": {
+    "type": "connection_state",
+    "target_connection": ["village_gate_exterior_id", "village_gate_interior_id"],
+    "action": "toggle_open_closed"
+  }
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+When an actor performs interact(target_id="gate_lever_1"), the tool's handler reads the controls payload and executes the specified change—in this case, modifying the connections_state.json file to open or close the main gate.
+4. Scenario Walkthrough: Opening the Gate
+This sequence demonstrates how the systems work together to create an emergent narrative event.
+Player Action: The player, located in village_gate_exterior, uses the talk_loud tool: > talk_loud "Hello! Open the gate!"
+Sound Propagation: The engine generates a SOUND_EVENT with noise_level: "loud".
+The sound is blocked from reaching village_gate_interior by the closed gate.
+Due to open-air vertical adjacency, the sound travels clearly to gatehouse_ramparts.
+NPC Perception: The Guard NPC on the ramparts is in their "think" cycle. The engine injects a structured perception into their prompt: { event: "sound", source_loc: "village_gate_exterior_id", content: "Hello! Open the gate!" }. The list of interactable objects in their prompt includes the gate lever.
+NPC Decision: The guard's LLM processes its goals and perceptions. It reasons that someone is requesting entry and the correct action is to operate the mechanism. It generates a command.
+LLM Output: interact(target_id="gate_lever_1")
+Engine Resolution: The interact tool's handler is executed. It reads the lever's controls data and modifies the connections_state file, changing the gate's status from closed to open. It generates a CONNECTION_STATUS_CHANGED event.
+Player Narration: The Narrator component processes the new event for the player.
+Player sees: From high on the wall, you hear a heavy clank, followed by the grinding of gears. The massive village gate slowly swings open, revealing the path inside.
+10.8 Object Ownership and Social Consequences
+To create a world with believable social rules, the engine must distinguish between using an unowned object, interacting with a locked container, and committing an act of theft. This system integrates item properties with the NPC perception and relationship systems to generate emergent social consequences.
+1. Core Principle: Ownership and State as Data
+Every item instance can have an owner, and containers can have a locked state. These properties are not hardcoded behaviors but data fields that tools and systems can query.
+1.1 Data Schema Extensions:
+items/instances/<item_id>.json is extended with two optional fields:
+owner_id: string | null: Stores the id of the NPC or faction who owns the item. null signifies the item is unowned.
+item_state: { [key: string]: any }: A generic object for mutable properties. For a container, this would hold its lock status.
+Example item_instance for a locked chest:
+Generated json
+     // in data/items/instances/blacksmith_chest_1.json
+{
+  "blueprint_id": "ornate_chest",
+  "current_location": "blacksmith_shop_id",
+  "owner_id": "npc_blacksmith_gregor_id",
+  "item_state": {
+    "status": "locked",
+    "key_id": "iron_key_123", // The item_id of the key that opens this chest
+    "lock_difficulty": 50    // For a potential 'lockpick' tool
+  },
+  "inventory": ["item_ingot_steel_5", "item_ingot_steel_6"]
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+2. Tool Logic and Event Generation
+The core tools for item interaction (grab_inventory, interact) must have more sophisticated validation logic to handle these properties. When an actor attempts to take an item owned by another:
+Check for Permission: The tool first checks if the owner has granted permission (see §10.9).
+Check for Witnesses: If no permission exists, the tool queries the Perception System: "Is the owner (or an ally of the owner) present and able to witness the action?"
+Generate Event:
+If witnessed, a THEFT_ATTEMPT_DETECTED event is generated.
+If unwitnessed, a THEFT_SUCCESSFUL event is generated, and the item is marked as stolen.
+This system turns a simple physical attempt into a complex social problem, where NPC reactions are driven by the event and their relationship to the perpetrator.
+
+10.9 Dynamic Permission and Delegated Action
+To handle scenarios where an owner requests another actor to handle their property (e.g., "Get the potion from my chest"), the engine uses a dynamic permission system. This avoids incorrectly flagging cooperative actions as theft.
+1. Core Principle: Permission as a Temporary State
+Permission is not a permanent property of an item. It is a temporary, goal-oriented allowance granted by an owner to another actor, tracked within the owner's own data file.
+2. The permission_granted Goal
+When an NPC grants permission, their LLM uses a tool (reason, delegate_task) to create a structured goal. This goal serves as a temporary, verifiable record of the permission.
+Example goal entry in the owner's JSON file:
+Generated json
+     // in data/npcs/npc_blacksmith_gregor.json
+"goals": [
+  {
+    "text": "Waiting for Player to retrieve potion.",
+    "type": "permission_granted",
+    "priority": "high",
+    "status": "active",
+    "payload": {
+      "grantee_id": "player_id",
+      "object_id": "blacksmith_chest_1",
+      "scope": ["interact", "grab_inventory"]
+    },
+    "expiry_tick": 12500 // Permission expires after 500 ticks
+  }
+]
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+3. Updated Validation Logic
+Before flagging an action as theft, the relevant tool (grab_inventory, interact) must perform a permission check:
+Identify the item's owner_id.
+Query the owner's goals and memories for an active permission_granted entry.
+The entry must match the acting character's id, the target object_id, and the attempted action must be within the scope.
+If a valid permission is found, the action is permitted and treated as a normal interaction.
+This system avoids data bloat by storing the permission state on the grantor, not the object, and allows for time-limited, specific permissions that enhance the simulation's social depth.
+
+10.10 Abstracted Knowledge and Intent Resolution
+To prevent LLM context overflow and to model a realistic separation between an actor's desires and their specific knowledge, the engine uses an Abstracted Knowledge model. NPCs are not omniscient about their own possessions.
+1. The LLM Decides the "What," the Engine Finds the "Where"
+The LLM's role is to form an intent based on its immediate state and character traits. The engine's role is to resolve that intent against the world's ground truth.
+LLM Forms Intent: An NPC's prompt contains its needs (e.g., low_hp), not a list of its assets. Based on this, the LLM forms a high-level intent. This is often facilitated by new, abstract tools.
+Example LLM Output: seek_and_use(item_type="food") rather than grab_inventory(item_id="apple_123").
+Engine Resolves Intent: The engine receives the abstract command. Its deterministic code then queries the JSON database to find a specific item that matches the request, following a logical search priority:
+The actor's personal inventory.
+Items owned by the actor in the current location.
+Items within containers owned by the actor in the current location.
+(Optional) Items in a known "home" or "storage" location tagged in the actor's memory.
+2. Narrative Richness through Fallibility
+This separation allows for realistic memory and assumption. An NPC can "believe" an item is in a location (a behavior encouraged by its base prompt, e.g., "You always keep potions in your chest") and act on that belief.
+The engine resolves this against the ground truth. If another character has moved the item, the action fails. This failure becomes the input for the NPC's next "think" cycle, leading to new, emergent goals like find(item_type="potion") or accusing a nearby actor of theft. This prevents NPCs from being magically all-knowing and creates a more dynamic and fallible simulation.
+10.10 Autonomous Movement and Pathfinding
+To support complex behaviors like schedules and resource gathering, NPCs must be able to move autonomously between non-adjacent locations. This requires a Pathfinding System that works with the actor's personal knowledge of the world map.
+1. Core Principle: Personal Knowledge vs. World Map
+An NPC does not have access to the full world map. Their ability to navigate is limited to a set of "known locations" stored in their memory. This prevents NPCs from magically knowing how to get to places they've never seen and makes exploration a meaningful activity for them.
+2. Known Locations Memory
+A new, dedicated field is added to the actor's data file to store their personal map.
+npcs/<npc_id>.json schema extension:
+Generated json
+     "known_locations": {
+  "home": "house_id_12",
+  "workplace": "blacksmith_shop_id",
+  "favorite_tavern": "sleepy_giant_inn_id",
+  "last_seen_player": "market_square_id",
+  "forest_entrance": "weeping_woods_gate_id"
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+Semantic Tags: This dictionary maps meaningful, semantic tags (like home, workplace) to specific location_ids. These tags are personal to each NPC.
+Discovery: This list is populated dynamically. When an NPC enters a new location with a significant tag (e.g., inn, mine), they can use a reason or reflect tool to add it to their known_locations. The last_seen_player entry can be updated by the perception system.
+3. The go_to Goal and Tool
+Autonomous movement is initiated when an NPC's LLM generates a go_to goal using one of its known semantic tags.
+LLM Reasoning: "I am tired. I should go home."
+LLM Output: go_to(destination_tag="home")
+The engine resolves home to house_id_12 by looking it up in that NPC's known_locations. If the NPC tries go_to(destination_tag="king_castle") but doesn't have that tag in its known locations, the action fails. This forces the NPC to form a new goal, such as ask_for_directions(topic="king_castle").
+4. Pathfinding Algorithm
+When the go_to tool is executed with a valid location_id, the engine's Pathfinding System calculates the optimal path.
+Graph Representation: The engine maintains a graph where all location_ids are nodes and hex_connections are edges.
+Algorithm: A standard algorithm like A* (A-star) is used to find the shortest path from the NPC's current location to the target. The algorithm accounts for impassable connections (e.g., locked doors, raised drawbridges) from the connections_state file.
+Path Storage: The calculated path, a list of location_ids, is stored as a temporary goal in the NPC's data file: { "type": "active_path", "path": ["loc_a", "loc_b", "loc_c"], "index": 0 }.
+5. Execution and Interruption
+On subsequent turns, the NPC's decision-making is temporarily overridden.
+Automatic Movement: If an active_path goal is present, the NPC will automatically execute a move command to the next location in the list on each of its turns.
+Re-evaluation: If a move action fails (e.g., a door on the path becomes locked), the active_path goal is cleared. The NPC's LLM is then prompted with the original go_to goal and the new obstacle ("You tried to move to loc_b, but the door was locked."). This forces it to decide whether to find a new path, wait, try to open the door, or abandon the goal, allowing for dynamic responses to a changing world.
+10.11 Abstracted Knowledge and Intent Resolution
+To prevent LLM context overflow and to model a realistic separation between an actor's desires and their specific knowledge, the engine uses an Abstracted Knowledge model. NPCs are not omniscient about their own possessions or the precise state of the world.
+1. Core Principle: Intent vs. Ground Truth
+The LLM's role is to form an intent based on its immediate state and character traits. The engine's role is to resolve that intent against the world's ground truth.
+LLM Forms Intent: An NPC's prompt contains its needs (e.g., low_hp, hungry), not a full manifest of its assets. Based on this, the LLM forms a high-level intent, often facilitated by abstract tools.
+Example LLM Output: seek_and_use(item_type="food") rather than grab_inventory(item_id="apple_123").
+Engine Resolves Intent: The engine receives the abstract command. Its deterministic code then queries the JSON database to find a specific item that matches the request, following a logical search priority:
+The actor's personal inventory.
+Items owned by the actor in the current location.
+Items within containers owned by the actor in the current location.
+Items within containers at a location in the actor's known_locations (e.g., searching the "home" location for food).
+2. Narrative Richness through Fallibility
+This separation allows for realistic memory and assumption. An NPC can "believe" an item is in a location (a behavior encouraged by its base prompt, e.g., "You always keep potions in your chest") and act on that belief. The engine resolves this against the ground truth. If another character has moved the item, the action fails. This failure becomes the input for the NPC's next "think" cycle, leading to new, emergent goals like find(item_type="potion") or accusing a nearby actor of theft. This prevents NPCs from being magically all-knowing and creates a more dynamic and fallible simulation.
+
+10.12 NPC Perception System
+To maintain engine stability and avoid unreliable LLM parsing, NPCs "perceive" the world through structured data, not prose narration. The Perception System is responsible for generating this data based on world events.
+1. Perception Events
+When a world event occurs (e.g., ITEM_DROPPED, SOUND_EMITTED, DAMAGE_APPLIED), the engine's Perception System generates structured PerceptionEvent objects for all relevant actors. These events are queued and added to an actor's LLM prompt during their next "think" cycle.
+Example: The Player drops a sword.
+For the Player: The Narrator component translates this into prose: You see Bob drop his steel sword with a loud clatter.
+For a nearby NPC: The engine adds a structured event to its data queue: { event_type: "perception", content: { event: "object_dropped", actor: "player_id", item: "item_sword_123", sound_level: "loud" } }.
+2. Perception Modifiers
+Perception is not uniform. The engine applies deterministic rules based on tags and state:
+Line of Sight: An actor must be in the same location (or have an elevated_vantage_point tag) to "see" a visual event. Obstructions within a location can also be modeled.
+Sensory Impairment: An actor with a blinded tag will not receive visual perception events. An actor in a location with a magical_darkness tag will have their perception range drastically reduced.
+Attention: An actor engaged in a high-focus task (e.g., crafting, combat) may have a lower chance of perceiving subtle events in their periphery.
+When it's the NPC's turn to act, their prompt includes this structured data. The LLM can then reason about it: "Perception: Player dropped a weapon. My Goal: Get a weapon. Therefore, my command is grab_inventory(item_sword_123)." This provides a reliable, scalable, and computationally efficient model for NPC awareness.
+
+10.13 Information Propagation and Trust (The Rumor Mill)
+To simulate the spread of information, secrets, and lies, the Memory system must be enhanced to track not just what an actor knows, but how they know it and how much they trust it.
+1. Enriched Memory Schema
+The memories object schema in NPC files is extended to include metadata about the information's origin and reliability.
+New memory structure:
+Generated json
+     {
+  "text": "Treasure is buried near the old oak tree.",
+  "tick": 13500,
+  "status": "recalled",
+  "source_id": "npc_gossip_ida_id", // Who told me this? null for direct observation.
+  "confidence": 0.6, // A score from 0.0 (baseless rumor) to 1.0 (verified fact).
+  "is_secret": false
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+2. Propagation Mechanics
+When an NPC shares information during a conversation, the listening NPC creates a new memory, but its confidence is modified by several factors:
+Source Confidence: The new confidence score starts with the source's confidence.
+Relationship Modifier: The listener's relationship with the speaker adjusts the score. A "trusted" friend might increase confidence (+0.2), while a "liar" or "rival" would decrease it (-0.4).
+Plausibility Check (LLM-driven): The receiving LLM can be prompted to briefly assess if the new information contradicts any of its own high-confidence memories, potentially further reducing the score.
+3. Behavioral Impact
+This system directly influences NPC behavior:
+Decision Making: An NPC will be more likely to act on a high-confidence memory. It might investigate a 0.5-confidence rumor but will risk its life based on a 1.0-confidence fact.
+Dialogue Nuance: The LLM can be prompted to use the confidence score to alter its dialogue. A low score results in "I heard a rumor that...", while a high score leads to "I know for a fact that...".
+Strategic Deception: A manipulative actor (Player or NPC) can deliberately spread false information. If their social standing is high, this false information may be treated as credible, leading other actors to make poor decisions based on the lie. This makes social engineering a viable strategy within the simulation.
+10.14 Multi-Actor Conversation Flow System
+1. Problem Statement
+A simple talk command is insufficient for conversations involving more than two actors. Without a formal structure, the simulation risks chaos: multiple NPCs speaking at once, the player being ignored, conversations never ending, and an inability for an actor to address a specific individual in a group. This system creates a deterministic, turn-based flow for conversations, managed by the engine.
+2. Core Principle: The Engine as a Moderator
+Conversation flow is not left to the LLMs. It is managed by a stateful Conversation object created and arbitrated by the simulation engine. Actors (Player and NPCs) can only speak when it is their designated turn. They can influence the turn order by using specific tools, but the engine is the final authority on who speaks next.
+3. Data Schema: The Conversation Object
+When a conversation begins, a new Conversation object is created and tracked by the engine. It is not stored in a JSON file but exists in the active world-state memory and is referenced by all participants.
+Conversation Object Schema:
+Generated json
+     {
+  "conversation_id": "convo_uuid_12345",
+  "participants": ["player_id", "npc_gregor_id", "npc_ida_id"],
+  "turn_order": ["npc_ida_id", "player_id"], // A queue of who speaks next.
+  "current_speaker": "npc_gregor_id",       // The only actor who can currently talk.
+  "topic": "The price of steel in the capital.",
+  "start_tick": 12450,
+  "last_interaction_tick": 12485,            // Used for timing out stale conversations.
+  "history": [                               // A log for the LLMs' context.
+    { "speaker": "player_id", "tick": 12455, "content": "Gregor, have you heard the latest?" },
+    { "speaker": "npc_gregor_id", "tick": 12485, "content": "No, what's the news?" }
+  ]
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+4. Tool Modifications and New Tools
+The core talk tool is enhanced, and new tools are added to manage conversation state.
+talk(content: string, target_id: string | null)
+If the actor is NOT in a conversation: Initiates a new conversation with the target_id as the first participant.
+If the actor IS in a conversation: Submits their dialogue. It will only be processed if actor_id == current_speaker.
+The optional target_id parameter is a hint to the engine to cede the turn to that specific actor.
+leave_conversation()
+A simple, parameter-free command. It signals the engine to remove the actor from the participants and turn_order lists of their current conversation.
+interject(conversation_id: string, content: string)
+Allows an actor who is not a participant but is present in the location to join an ongoing conversation. The engine adds them to the end of the turn_order.
+5. Engine Workflow: The Conversation State Machine
+Initiation:
+An actor (e.g., Player) uses talk(content="Hello", target_id="npc_gregor_id").
+The engine sees the Player is not in a conversation.
+It creates a new Conversation object with participants: ["player_id", "npc_gregor_id"], current_speaker: "player_id", and turn_order: ["npc_gregor_id"].
+The Player's speech is added to the history. The engine processes the speech event.
+Turn Progression:
+After the current_speaker has spoken, the engine must update the turn.
+Default Rule (Round-Robin): The current_speaker is moved to the end of the turn_order queue. The actor at the front of the queue becomes the new current_speaker.
+Targeted Speech Rule: If the speaker used talk with a valid target_id who is in the conversation, the engine moves that target to the front of the turn_order queue. This models asking a direct question.
+Validation:
+If an actor attempts to talk but it is not their turn (actor_id != current_speaker), the engine rejects the command and can optionally inform the LLM of its mistake in the next prompt cycle (Error: Not your turn to speak.).
+Termination:
+An actor uses leave_conversation(). The engine removes them from the participants and turn_order.
+If the number of participants drops below 2, the engine automatically dissolves the conversation, deleting its object from the active state.
+The engine can also be configured to dissolve conversations where game_tick - last_interaction_tick exceeds a certain threshold (e.g., 300 ticks), representing the group falling silent.
+6. Scenario Walkthrough
+Setup: The Player, Gregor, and Ida are in the market_square. No conversation is active.
+Tick 500: The Player decides to act.
+Player LLM Output: talk(content="Gregor, how is the forge today?", target_id="npc_gregor_id")
+Engine Action: Creates convo_1. State is now:
+participants: ["player_id", "npc_gregor_id"]
+current_speaker: "player_id" (is now finished speaking)
+turn_order: ["npc_gregor_id"]
+Engine processes the turn update: current_speaker becomes npc_gregor_id. turn_order becomes ["player_id"].
+Tick 510: It is now Gregor's turn to act. He is aware he is in convo_1.
+Gregor LLM Output: talk(content="Busy! But Ida was just telling me something interesting.")
+Engine Action: Processes Gregor's speech. Ida is not yet in the conversation. Engine updates the turn. current_speaker becomes player_id. turn_order becomes ["npc_gregor_id"].
+Tick 515: It is Ida's turn to act (for her own goals). She notices the conversation.
+Ida LLM Output: interject(conversation_id="convo_1", content="Don't you go spreading my secrets, Gregor!")
+Engine Action: Validates Ida can perceive convo_1. Adds her to the conversation. State is now:
+participants: ["player_id", "npc_gregor_id", "npc_ida_id"]
+current_speaker: "player_id" (it's still the player's turn)
+turn_order: ["npc_gregor_id", "npc_ida_id"] (Ida is added to the end).
+Tick 520: It is the Player's turn. They decide to ask Ida a direct question.
+Player LLM Output: talk(content="What secrets, Ida?", target_id="npc_ida_id")
+Engine Action: Processes speech. The engine sees the target_id. It updates the turn. current_speaker becomes npc_ida_id. turn_order is re-ordered to ["npc_gregor_id", "player_id"]. Ida is now next to speak, jumping Gregor in the queue.
+
+10.15 Deterministic Combat & Weapon System
+1. Problem Statement
+The original combat description was too abstract ("handled mostly like an rpg"). This creates ambiguity and prevents the engine from acting as a deterministic referee. For a rich simulation, combat must be resolved by a clear, non-negotiable set of rules that the LLM can reason about at a high level, but cannot directly manipulate.
+2. Core Principle: The Engine is the Combat Referee
+The LLM's role is to decide the intent to act (e.g., attack(target_id="goblin_1")). The engine's role is to resolve that intent by executing a strict, step-by-step mechanical process. The LLM is made aware of an actor's capabilities through high-level information in its prompt ("You are a master swordsman and you feel weary"), but it never performs calculations or rolls dice. This ensures every combat action is deterministic, balanced, and auditable.
+3. Data Schema Extensions
+To support this system, several data files require new, structured fields.
+3.1. Item Catalog (items/catalog.json)
+Weapon blueprints now contain explicit mechanical properties.
+Generated json
+     // Example entry for a "Longsword" blueprint
+"longsword": {
+  "weight": 3,
+  "damage_dice": "1d8",
+  "damage_type": "slashing",
+  "properties": ["versatile (1d10)"], // List of special rules
+  "skill_tag": "skill_swords"         // Links to the required skill
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+damage_dice (string): The dice to roll for damage (e.g., "1d6", "2d4").
+damage_type (string): slashing, piercing, bludgeoning, fire, etc. Used for resistances and vulnerabilities.
+properties (list of strings): Special tags that trigger unique rules in the engine. Examples:
+finesse: Allows using Dexterity instead of Strength for attack and damage rolls.
+two-handed: Requires slots.off_hand to be empty, often increases damage.
+reach: Allows attacking targets from an adjacent hex/sublocation.
+versatile (1d10): Uses a larger damage die when wielded two-handed.
+skill_tag (string): The skill tag (e.g., skill_swords) that applies to this weapon.
+3.2. NPC/Player Sheet (npcs/<id>.json, player.json)
+Actors need core attributes and a formal skill structure.
+Generated json
+     {
+  // ... existing fields like hp, name, etc.
+  "attributes": {
+    "strength": 14,
+    "dexterity": 12,
+    "constitution": 13
+  },
+  "skills": {
+    "skill_swords": "expert",
+    "skill_archery": "novice",
+    "unarmed_combat": "novice"
+  }
+}
+   
+IGNORE_WHEN_COPYING_START
+Use code with caution. Json
+IGNORE_WHEN_COPYING_END
+attributes: Core physical stats. Modifiers are derived by the engine: (Stat - 10) / 2. (e.g., Strength 14 -> +2 modifier).
+skills: A dictionary mapping skill tags to proficiency levels (novice, proficient, expert, master).
+4. Engine Workflow: The Attack Resolution Sequence
+When an actor executes the attack tool, the engine follows this exact sequence:
+Step 1: Intent & Validation
+Actor's LLM outputs attack(target_id="goblin_2").
+The engine validates the action: Is the target alive? Is the target within range (considering weapon reach property and location adjacency)? If not, the action fails.
+Step 2: The "To-Hit" Roll
+The engine calculates if the attack connects.
+Base Roll: 1d20
+Attack Bonus: Attribute Modifier + Proficiency Bonus
+Attribute Modifier: By default, Strength for melee and Dexterity for ranged. If a weapon has the finesse property, the attacker can use the higher of their Strength or Dexterity modifier.
+Proficiency Bonus: Derived from the relevant skill level (e.g., novice: +1, proficient: +2, expert: +3, master: +4). Unarmed or non-proficient attacks get +0.
+Advantage / Disadvantage: Certain tags can modify the roll.
+Advantage: Roll 2d20, take the highest. Caused by tags like hidden, target_prone, or elevated_vantage_point (for ranged).
+Disadvantage: Roll 2d20, take the lowest. Caused by tags like blinded, restrained, or location tags like muddy.
+Step 3: Target's Defense (Armor Class)
+The "To-Hit" roll is compared against the target's Armor Class (AC).
+AC Calculation: Base AC + Armor Bonus + Dexterity Modifier
+Base AC: All creatures have a base of 10.
+Armor Bonus: Comes from the armour_rating of all equipped items in the slots field.
+Dexterity Modifier: The target's dexterity bonus adds to their ability to dodge. (Some heavy armors may negate this).
+Result: If To-Hit Roll >= AC, the attack hits. Otherwise, it is a miss.
+Step 4: The Damage Roll (on a Hit)
+Base Damage: The engine rolls the damage_dice from the weapon's blueprint (e.g., "1d8").
+Bonus Damage: Add the same Attribute Modifier used for the "To-Hit" roll.
+Critical Hit: If the d20 "To-Hit" roll was a natural 20, the damage dice are rolled twice (e.g., a 1d8 weapon rolls 2d8).
+Step 5: Damage Application & Mitigation
+The raw damage is modified by the target's resistances or vulnerabilities, which are stored in their tags.dynamic or tags.inherent list.
+Resistance: Target takes half damage (rounded down). Example tag: { "resistance": "fire" }.
+Vulnerability: Target takes double damage. Example tag: { "vulnerability": "slashing" }.
+The final, modified damage is subtracted from the target's hp.
+Step 6: Event Generation
+The engine generates a sequence of structured events that are added to the event queue.
+ATTACK_ATTEMPTED { actor, target, weapon }
+ATTACK_MISSED or ATTACK_HIT { actor, target, to_hit_roll, target_ac }
+(If hit) DAMAGE_APPLIED { target, amount, damage_type, final_hp }
+The Narrator component then uses this event chain to construct a descriptive, moment-to-moment narrative for the player.
+5. Scenario Walkthrough
+Actors & Location:
+Player (str: 16 [+3], skills: { "skill_axes": "proficient" [+2] }) is wielding a Battleaxe (damage_dice: "1d8", skill_tag: "skill_axes").
+Goblin (dex: 14 [+2], hp: 11) is wearing Leather Armor (armour_rating: 1).
+Location has no special tags.
+Combat Turn:
+Intent: The Player's LLM outputs attack(target_id="goblin_1").
+To-Hit Roll:
+Engine rolls a d20: it comes up 13.
+Player's Strength modifier is +3.
+Player's proficiency with axes is +2.
+Total "To-Hit" = 13 + 3 + 2 = 18.
+Goblin's AC:
+Base AC is 10.
+Leather Armor bonus is +1.
+Goblin's Dexterity modifier is +2.
+Total AC = 10 + 1 + 2 = 13.
+Result & Damage:
+18 >= 13. It's a Hit!
+Engine rolls the Battleaxe's 1d8 damage die: it comes up 5.
+Player's Strength bonus is +3.
+Total raw damage = 5 + 3 = 8.
+Mitigation: The Goblin has no relevant resistances. Final damage is 8.
+State Change: The Goblin's hp is updated: 11 - 8 = 3.
+Events Generated: ATTACK_HIT and DAMAGE_APPLIED events are queued.
+Player Narration: "You swing your Battleaxe with expert precision, striking the goblin's leather armor with a satisfying thud. The creature shrieks as a deep gash opens across its side."
+ The Development Roadmap: From Foundation to Living World
+The core principle of this roadmap is: Build and test deterministic systems first, then introduce the LLM's non-deterministic "magic" into a structure that can handle it.
+
+Phase 1: The Skeleton - Core Data and World State (Highest Priority)
+This phase is about creating the non-moving, non-interactive world. You need to be able to load your universe into memory before you can do anything with it.
+Priority 1: Data Schemas and The WorldState Class
+What to Build:
+Python Data Classes: Create Python classes that perfectly mirror your JSON schemas (NPC, ItemInstance, ItemBlueprint, LocationStatic, LocationState, Tag). Using dataclasses or, even better, a library like Pydantic will give you automatic data validation.
+The WorldState Manager: A central Python class (WorldState) responsible for loading all the JSON files from the /data directory into a collection of your Pydantic/dataclass objects. It will hold everything in memory (e.g., world.npcs, world.locations).
+Utility Functions: Write simple functions within WorldState to retrieve objects by ID (e.g., get_npc(npc_id), get_item(item_id)).
+Why First? This is the absolute bedrock of the engine. Without a way to load, represent, and access your game's data, no other system (not the event loop, not the LLM) can function. It's also the easiest part to test in isolation. You can write a simple script to verify that world.load() works and that you can access, for example, a specific NPC's inventory.
+How to Approach It:
+Create an engine/data_models.py for all your data classes.
+Create an engine/world_state.py for the WorldState class.
+Start with just loading NPCs and Locations. Don't worry about items or tags yet.
+Test: Write a scripts/test_loader.py that simply creates a WorldState instance, loads the data, and prints the name of a specific NPC.
+
+Phase 2: The Heartbeat - The Simplest Game Loop
+Now, let's make the world "tick" and allow for the most basic, hardcoded player interaction. No LLM yet.
+Priority 2: The Event Loop and a Single, Simple Tool
+What to Build:
+The Game Clock: A main game.py file with a while True: loop. At the top of the loop, increment a game_tick variable.
+The Event Queue: A simple Python list or collections.deque that will hold event dictionaries.
+The Player Object: Load the player.json file into a Player object (which uses the same class as an NPC).
+A Hardcoded look Tool: Create a function that, when called, inspects the player's current location in the WorldState and generates a PLAYER_SEES_DESCRIPTION event.
+An Event Handler: A simple if/elif block that processes events from the queue. For now, it only knows how to handle PLAYER_SEES_DESCRIPTION by printing the description to the console.
+Why First? This creates the fundamental Command -> Event -> Handler -> State Change/Output pipeline. By using a hardcoded command (look), you can build and test this entire flow without the complexity and unreliability of an LLM. This ensures your core game architecture is sound.
+How to Approach It:
+In your main loop, start with a simple command = input("> ").
+If command == "look", call your look_tool() function.
+look_tool() gets the player's location from the WorldState and appends an event like {"event_type": "DESCRIBE_LOCATION", "payload": {"description": "..."}} to the event queue.
+The event handler pops this event and prints the payload.
+You now have a testable, interactive, (but boring) game.
+
+Phase 3: The Brain Stem - Basic LLM Integration
+Now it's time to bring in the LLM to translate human language into the structured commands your engine understands.
+Priority 3: LLM Command Parser for a Single Tool
+What to Build:
+LLM Connector: A simple class (LLMClient) that knows how to send a prompt to your LM Studio endpoint and get a response.
+A System Prompt: A carefully crafted system prompt that tells the LLM its only job is to convert player text into a specific JSON format.
+Integrate into the Loop: Replace the input() logic from the previous step. Now, take the player's text, send it to the LLMClient, and get back a JSON command.
+JSON Validation: After getting the response, rigorously validate that it's the JSON you expect. If not, for now, just print an error.
+Why First? This isolates the most volatile part of your system. Getting the LLM to reliably produce structured data is a challenge. By starting with just one simple tool (look), you can focus all your effort on tuning the prompt until it works perfectly for that single case before adding more complexity.
+How to Approach It:
+Your system prompt should be very direct: "You are a command parser for a text game. Given the user's input, your only job is to return a JSON object for the action they want to take. The only available action is 'look'. Example: User says 'look around'. You return: {\"tool\": \"look\"}".
+When the LLM returns the JSON, use a try/except block to parse it. If it fails, or if response['tool'] != 'look', it's an error. This is the seed of your future fallback system.
+
+Phase 4: Expanding the World and Player Agency
+With the core loop and LLM connection working for one action, you can now expand the player's capabilities and the world's interactivity.
+Priority 4: The Tool System and Core Mechanics
+What to Build:
+The Tool Base Class (§10.6): This is critical. Create the abstract Tool class. This forces a clean, unified structure for all future actions.
+Implement Basic Tools: Create subclasses for MoveTool, GrabInventoryTool, and TalkTool (in a very basic form). Update your LLM prompt to include these new tools and their JSON formats.
+The Action-Time System (§10.8): Implement the next_available_tick on actors and time_cost on tools. This is a fundamental change to your main loop, so it's better to do it now before you have dozens of tools to update. Your loop now becomes "find ready actors" instead of "loop through all actors".
+Deterministic Combat System (§10.15): Implement the full combat resolution sequence. This is a big but self-contained module. The LLM's only job is to output attack(target_id). Your CombatHandler does all the math (To-Hit, AC, Damage, etc.). This is a perfect test of your event system (ATTACK_ATTEMPTED -> ATTACK_HIT -> DAMAGE_APPLIED).
+Why First? The Tool base class provides architectural stability. The Action-Time system is a core change to the simulation's flow and is easier to implement early. The Combat system provides a robust test case for complex, multi-stage event processing and state mutation (hp).
+How to Approach It:
+Create an engine/tools/ directory. Put base.py, move.py, attack.py, etc., inside.
+Your main loop now fetches the tool name from the LLM's JSON and looks up the corresponding Tool object in a registry (a simple dictionary).
+When implementing combat, create a separate rpg/combat_rules.py module. Keep the logic clean and separate from the main engine loop.
+
+Phase 5: Bringing the World to Life - NPC AI (Lowest Priority for Core Functionality, Highest for "Living" Feel)
+Now that the world has rules and the player can act, it's time to make the NPCs act, too.
+Priority 5: The NPC "Think" Cycle and Social Systems
+What to Build:
+The NPC Think Function: In your main loop, when it's a "ready" NPC's turn, you need a function that assembles a prompt for them. This prompt should include their core data, recent memories/perceptions, and goals.
+Multi-Actor Conversation Flow (§10.14): This is extremely important and complex. Implement the Conversation object and the engine's role as moderator. This is a prerequisite for any meaningful social interaction. Follow your design doc for this meticulously.
+Basic Memory and Perception (§10.12): Start simple. When an event happens, generate a structured PerceptionEvent for any NPC in the same location. Add this to a short_term_memory list in their data. The "think" function will include these memories in the prompt.
+Ownership and Theft (§10.8): Implement the owner_id on items and update the GrabTool to check for witnesses and generate THEFT_ATTEMPTED events. This adds social consequence.
+Why Last? These are the most complex, emergent systems. They rely on everything you have built so far. The game is playable without them, but they are what will make it "Living Tapestry." Trying to build the conversation manager before you have a stable event loop and tool system is a recipe for frustration.
+How to Approach It:
+Memory: Don't worry about RAG or vector databases yet. A simple list of the last 20 perception events is a powerful start.
+Conversation: Test this system with hard-coded NPC responses first before plugging in the LLM to ensure the turn-passing logic is perfect.
+Pathfinding (§10.10): This comes after the NPC "think" cycle. Once an NPC can decide "I need to go home," you can implement A* pathfinding to generate the series of move commands to get them there.
+
+Final Polish and Robustness (Do these as needed or at the end)
+These are features that improve the experience and make the engine more resilient.
+The Narrator (§10.3): A system that consumes the event queue and translates it into prose for the player. This can be built at any time after the event system is stable.
+LLM Fallback System (§9): As you find common ways the LLM fails to generate valid JSON, build your retry system with more specific prompts.
+Tag Rules Engine (§10.4): An automated system that reacts to tag changes. This adds a layer of emergent effects (e.g., fire + water -> steamed).
+Advanced Memory (Consolidation/RAG): This is a significant enhancement. Only tackle this once the basic memory-in-prompt system is working and you find you are hitting context limits.
+By following this roadmap, each step builds upon a previously tested, stable foundation, making the complex and exciting challenge of building "Living Tapestry" much more manageable. Good luck
+

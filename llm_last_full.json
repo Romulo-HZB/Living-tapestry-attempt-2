@@ -1,0 +1,24 @@
+{
+  "id": "chatcmpl-pkfif8p3ubliyyo8f2z89",
+  "object": "chat.completion",
+  "created": 1754633192,
+  "model": "qwen3-4b-thinking-2507",
+  "choices": [
+    {
+      "index": 0,
+      "logprobs": null,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "\nOkay, let's see. The user input is \"i scream aaaaaaa\". So first, I need to figure out which tool this maps to.\n\nLooking at the available tools, there's \"scream\" with a params object that takes a content string. The input says \"i scream aaaaaaa\", so the action here is screaming. The phrase \"aaaaaaa\" is probably just the sound they're making, so the content would be \"aaaaaa\" (maybe trimmed to make it natural). \n\nThe tool should be \"scream\" and the params need the content. Since the user wrote \"i scream aaaaaaa\", the actual scream content is \"aaaaaa\". But in the parameters, it's expecting \"<text>\", so I'll put \"aaaaaa\" there. Wait, maybe the exact string they used? The input says \"aaaaaaa\" but in JSON keys, perhaps it's better to use what they said.\n\nWait, the user wrote \"i scream aaaaaaa\", which translates to the action of screaming with that sound. So the content param would be \"aaaaaa\". But the example uses \"content\":\"<text>\", so maybe just take the part after \"scream\" as the text. The input is \"i scream aaaaaaa\", but in game terms, the player's command here is to scream, and the message they want to scream is \"aaaaaa\".\n\nSo the tool is \"scream\" with params {\"content\": \"aaaaaa\"}.\n\nWait, check the available tools: yes, there's a \"scream\" tool that takes a content string. The other talk variants are for talking normally or loudly. Since they said \"scream\", it's definitely the scream tool.\n\nAlso, looking at the guidelines: synonyms like yell/shout -> talk_loud, but here it's specifically \"scream\", so no confusion. So the correct tool is scream with content as the text they provided. The input says \"aaaaaaa\" (7 a's), but maybe in the game it's okay to use that.\n\nWait, the user's input is exactly \"i scream aaaaaaa\". So the actual scream content here is \"aaaaaa\" (maybe they have a typo with an extra 'a', but I'll go with what's written). The tool needs a JSON object with tool \"scream\" and params {\"content\": \"aaaaaaa\"}.\n\nWait, but in the problem statement, it says to map exactly. Let me check again.\n\nThe context has player_id: npc_sample, location: town_square, etc. But the input is about screaming, so the tool is scream. The content is the string after \"scream\", which is \"aaaaaaa\". So params should be {\"content\": \"aaaaaaa\"}.\n\nBut in JSON, the keys are strings, and the values need to match. So the output would be {\"tool\": \"scream\", \"params\": {\"content\": \"aaaaaaa\"}}.\n\nWait, but does the game require a specific format for the content? The problem says to use exactly the input's text. Since the user wrote \"i scream aaaaaaa\", their action is screaming with that sound. So yes, the content is \"aaaaaaa\".\n\nI don't see any other tool that fits here. The other options like talk_loud or talk are for different things, but since they used \"scream\", it's specifically the scream tool.\n\nSo final answer should be {\"tool\": \"scream\", \"params\": {\"content\": \"aaaaaaa\"}}\n\n\n{\"tool\": \"scream\", \"params\": {\"content\": \"aaaaaaa\"}}"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 646,
+    "completion_tokens": 737,
+    "total_tokens": 1383
+  },
+  "stats": {},
+  "system_fingerprint": "qwen3-4b-thinking-2507"
+}
