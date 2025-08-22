@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Living Tapestry — Play</title>
+  <style>
+    :root{
+      --bg: #0c1420;
+      --surface: #0f1b2b;
+      --card: rgba(17,28,45,0.85);
+      --border: #263a56;
+      --muted: #9fb3d6;
+      --text: #e6eefc;
+      --accent: #4ecca3;
+      --edge-closed: #cc4e4e;
+      --shadow: 0 6px 18px rgba(0,0,0,0.25);
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; background:var(--bg); color:var(--text);
+      font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, Inter, Arial;
+      font-size:14px;
+    }
+    /* Top bar */
+    .topbar{
+      position:sticky; top:0; z-index:20;
+      display:flex; align-items:center; justify-content:space-between;
+      background:var(--surface); border-bottom:1px solid var(--border);
+      padding:10px 14px;
+    }
+    .group-row{display:flex; align-items:center; gap:18px; flex-wrap:wrap}
+    .hover-wrap{position:relative; display:flex; align-items:center; gap:6px; color:var(--muted)}
+    .hover-wrap .label{color:var(--muted); font-weight:600}
+    .hover-wrap .value{color:var(--text)}
+    .icon{opacity:.9}
+    .sep{width:1px; height:18px; background:var(--border); opacity:.7}
+    .hover-card{
+      position:absolute; top:28px; left:-6px; min-width:220px; max-width:340px;
+      background:var(--card); border:1px solid var(--border); border-radius:10px;
+      box-shadow:var(--shadow); padding:10px 12px; color:var(--text);
+      opacity:0; transform:translateY(-4px); pointer-events:none; transition:opacity .12s ease, transform .12s ease;
+      backdrop-filter: blur(6px);
+    }
+    .hover-wrap:hover .hover-card{opacity:1; transform:translateY(0); pointer-events:auto}
+    .hover-card .item{padding:6px 2px; color:var(--text)}
+    .hover-card .empty{color:var(--muted)}
+    /* Tabs pill (visual only) */
+    .tabs{
+      display:flex; gap:6px; padding:4px; background:rgba(255,255,255,0.05);
+      border:1px solid var(--border); border-radius:999px; color:var(--muted)
+    }
+    .tabs .tab{padding:6px 12px; border-radius:999px; background:transparent; user-select:none}
+    .tabs .tab.active{background:rgba(78,204,163,0.08); color:var(--accent); border:1px solid rgba(78,204,163,0.25)}
+    /* Main layout */
+    .shell{height:calc(100% - 52px); padding:14px}
+    .grid{
+      height:100%;
+      display:grid; grid-template-columns: 1fr 420px; gap:14px;
+    }
+    .card{
+      background:var(--card); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow);
+      display:flex; flex-direction:column; min-height:0;
+    }
+    .card-header{
+      padding:10px 12px; font-weight:700; color:var(--muted);
+      border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;
+    }
+    .badge{font-size:11px; padding:4px 10px; border-radius:999px; color:#9fead1; border:1px solid rgba(78,204,163,0.35); background:rgba(78,204,163,0.08)}
+    /* Map viewport */
+    #viewport{position:relative; flex:1; overflow:hidden; border-radius:0 0 12px 12px}
+    svg.layer{position:absolute; inset:0; width:100%; height:100%; pointer-events:none}
+    #nodes{position:absolute; inset:0; pointer-events:none}
+    .node{position:absolute; transform:translate(-50%,-50%); text-align:center; color:var(--text); font-size:12px}
+    .hex{
+      width: calc(var(--hexW)); height: calc(var(--hexH));
+      background: rgba(39,50,76,0.65);
+      border:1px solid rgba(255,255,255,0.08);
+      clip-path: polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%);
+      display:flex; align-items:center; justify-content:center; padding:4px; color:#dfebff;
+    }
+    .hex .label{opacity:.9; text-shadow:0 1px 0 rgba(0,0,0,0.35)}
+    .unused{fill:rgba(255,255,255,0.06); font-size:9.5px}
+    /* Action log */
+    #logList{flex:1; overflow:auto; padding:12px}
+    .logline{padding:6px 0; color:#e8f2ff}
+    .log-muted{color:var(--muted)}
+    .log-footer{
+      padding:10px 12px; border-top:1px solid var(--border); display:flex; align-items:center; gap:10px; background:rgba(0,0,0,0.05); border-radius:0 0 12px 12px
+    }
+    .input{
+      flex:1; padding:10px 12px; border-radius:10px; background:rgba(255,255,255,0.04); color:var(--muted);
+      border:1px solid var(--border)
+    }
+    .btn{padding:10px 14px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.05); color:var(--muted)}
+    .hint{padding:6px 12px; color:var(--muted); font-size:12px}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="group-row">
+      <div class="hover-wrap" id="invWrap">
+        <span class="icon">🎒</span>
+        <span class="label">Inventory:</span>
+        <span class="value" id="invSummary">—</span>
+        <div class="hover-card" id="invDropdown"></div>
+      </div>
+      <div class="hover-wrap" id="equipWrap">
+        <span class="icon">🗡️</span>
+        <span class="label">Equipped:</span>
+        <span class="value" id="equipValue">—</span>
+      </div>
+      <span class="sep"></span>
+      <div class="hover-wrap" id="npcsWrap">
+        <span class="icon">👥</span>
+        <span class="label">NPCs at your location:</span>
+        <span class="value" id="npcsSummary">—</span>
+        <div class="hover-card" id="npcsDropdown"></div>
+      </div>
+      <span class="sep"></span>
+      <div class="hover-wrap" id="itemsWrap">
+        <span class="icon">🧺</span>
+        <span class="label">Items at your location:</span>
+        <span class="value" id="itemsSummary">—</span>
+        <div class="hover-card" id="itemsDropdown"></div>
+      </div>
+    </div>
+    <div class="tabs" aria-hidden="true">
+      <div class="tab active">PLAY</div>
+      <div class="tab">DESIGNER</div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <div class="grid">
+      <!-- Left: Map -->
+      <section class="card">
+        <div class="card-header">
+          <span>Map</span>
+          <span class="hint">Drag to pan • Wheel to zoom</span>
+        </div>
+        <div id="viewport">
+          <svg id="grid" class="layer"></svg>
+          <svg id="edges" class="layer"></svg>
+          <div id="nodes"></div>
+        </div>
+      </section>
+
+      <!-- Right: Action Log -->
+      <section class="card">
+        <div class="card-header">
+          <span>Action Log</span>
+          <span class="badge">PLAY</span>
+        </div>
+        <div id="logList">
+          <div class="logline log-muted">Welcome to the valley.</div>
+          <div class="logline log-muted">You feel a chilly breeze.</div>
+          <div class="logline log-muted">Footprints fade into the mud.</div>
+        </div>
+        <div class="log-footer">
+          <input class="input" placeholder="What do you want to do?" disabled />
+          <button class="btn" disabled>Send</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+  <script>
+    // ---- Config / constants ----
+    const HEX_SIZE = 44; // px outer radius (flat-top)
+    const SQRT3 = Math.sqrt(3);
+
+    // state
+    let panX = 0, panY = 0, scale = 1;
+    let locations = {};    // id -> {hex:{q,r}, name, edges:{ neighbor: {status, direction} } }
+    let centers = {};      // id -> {x,y} in world coords
+    let lastState = null;  // for diff-based log fallback
+
+    // Elements
+    const vp = document.getElementById('viewport');
+    const gridSvg = document.getElementById('grid');
+    const edgesSvg = document.getElementById('edges');
+    const nodesLayer = document.getElementById('nodes');
+    const invSummary = document.getElementById('invSummary');
+    const invDropdown = document.getElementById('invDropdown');
+    const equipValue = document.getElementById('equipValue');
+    const npcsSummary = document.getElementById('npcsSummary');
+    const npcsDropdown = document.getElementById('npcsDropdown');
+    const itemsSummary = document.getElementById('itemsSummary');
+    const itemsDropdown = document.getElementById('itemsDropdown');
+    const logList = document.getElementById('logList');
+
+    // Expose CSS custom sizes for nodes
+    document.documentElement.style.setProperty('--hexW', `${2*HEX_SIZE}px`);
+    document.documentElement.style.setProperty('--hexH', `${SQRT3*HEX_SIZE}px`);
+
+    // ---- Hex math ----
+    function axialToPixel(q,r){ return { x: HEX_SIZE*(1.5*q), y: HEX_SIZE*(SQRT3*(r + q/2)) }; }
+    function pixelToAxialFloat(x,y){ return { q:(2/3)*x/HEX_SIZE, r:(-1/3)*x/HEX_SIZE + (1/3)*SQRT3*y/HEX_SIZE }; }
+
+    // ---- Pan/Zoom ----
+    function applyTf(){
+      const tf = `translate(${panX}px, ${panY}px) scale(${scale})`;
+      for(const el of [gridSvg, edgesSvg, nodesLayer]){
+        el.style.transform = tf;
+        el.style.transformOrigin = '0 0';
+      }
+      drawGrid();
+    }
+    let dragging=false, lx=0, ly=0;
+    vp.addEventListener('mousedown', e=>{ dragging=true; lx=e.clientX; ly=e.clientY; });
+    window.addEventListener('mouseup', ()=> dragging=false);
+    window.addEventListener('mousemove', e=>{ if(!dragging) return; const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY; panX+=dx; panY+=dy; applyTf(); });
+    vp.addEventListener('wheel', e=>{ e.preventDefault(); const k=e.deltaY<0?1.1:0.9; const old=scale; scale=Math.min(4, Math.max(0.3, scale*k)); const rect=vp.getBoundingClientRect(); const mx=e.clientX-rect.left, my=e.clientY-rect.top; panX = mx - (mx - panX)*(scale/old); panY = my - (my - panY)*(scale/old); applyTf(); }, {passive:false});
+
+    // ---- Data pulling ----
+    async function pullLocations(){
+      const res = await fetch('/api/locations');
+      locations = await res.json();
+      computeCenters();
+      renderAll();
+    }
+    async function pullState(){
+      const res = await fetch('/api/state');
+      const st = await res.json();
+      updateTopbar(st);
+      synthesizeLog(lastState, st);
+      lastState = st;
+      return st;
+    }
+
+    function computeCenters(){
+      centers = {};
+      for(const id in locations){
+        const h = (locations[id].hex)||{q:0,r:0};
+        centers[id] = axialToPixel(h.q, h.r);
+      }
+    }
+
+    function renderAll(){
+      drawGrid();
+      drawEdges();
+      drawNodes();
+    }
+
+    // Draw faint hex lattice and unused labels
+    function drawGrid(){
+      while(gridSvg.firstChild) gridSvg.removeChild(gridSvg.firstChild);
+      const rect = vp.getBoundingClientRect();
+      const toContent = (sx,sy)=>({ x:(sx - panX)/scale, y:(sy - panY)/scale });
+      const tl = toContent(0,0), tr = toContent(rect.width,0), bl = toContent(0,rect.height), br = toContent(rect.width, rect.height);
+      const f = [tl,tr,bl,br].map(p=>pixelToAxialFloat(p.x,p.y));
+      let qmin = Math.floor(Math.min(...f.map(v=>v.q))) - 3;
+      let qmax = Math.ceil(Math.max(...f.map(v=>v.q))) + 3;
+      let rmin = Math.floor(Math.min(...f.map(v=>v.r))) - 3;
+      let rmax = Math.ceil(Math.max(...f.map(v=>v.r))) + 3;
+
+      // Build set of used axial coordinates
+      const used = new Set();
+      for(const id in locations){
+        const h = locations[id].hex || {q:0,r:0};
+        used.add(`${h.q},${h.r}`);
+      }
+
+      for(let q=qmin; q<=qmax; q++){
+        for(let r=rmin; r<=rmax; r++){
+          const c = axialToPixel(q,r);
+          const poly = document.createElementNS('http://www.w3.org/2000/svg','polygon');
+          const pts=[]; for(let k=0;k<6;k++){ const ang=Math.PI/180*(60*k); pts.push(`${c.x + HEX_SIZE*Math.cos(ang)},${c.y + HEX_SIZE*Math.sin(ang)}`);}
+          poly.setAttribute('points', pts.join(' '));
+          poly.setAttribute('fill','none');
+          poly.setAttribute('stroke','rgba(255,255,255,0.08)');
+          poly.setAttribute('stroke-width','1');
+          gridSvg.appendChild(poly);
+
+          if(!used.has(`${q},${r}`)){
+            const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            t.setAttribute('x', c.x);
+            t.setAttribute('y', c.y+3);
+            t.setAttribute('text-anchor', 'middle');
+            t.setAttribute('class', 'unused');
+            t.textContent = 'Unused hexagon location';
+            gridSvg.appendChild(t);
+          }
+        }
+      }
+    }
+
+    // Draw only CLOSED edges as short red walls between centers
+    function drawEdges(){
+      while(edgesSvg.firstChild) edgesSvg.removeChild(edgesSvg.firstChild);
+      const drawn = new Set();
+      for(const a in locations){
+        const ea = locations[a].edges || {};
+        for(const b in ea){
+          const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+          if(drawn.has(key)) continue;
+          drawn.add(key);
+          const meta = ea[b] || {};
+          if((meta.status||'open') === 'open') continue; // draw only closed
+
+          const ca = centers[a], cb = centers[b];
+          if(!ca || !cb) continue;
+          // Midpoint
+          const mx = (ca.x + cb.x)/2, my = (ca.y + cb.y)/2;
+          // Direction vector
+          const dx = cb.x - ca.x, dy = cb.y - ca.y;
+          const len = Math.hypot(dx,dy) || 1;
+          // Perpendicular unit normal
+          const nx = -dy/len, ny = dx/len;
+          const half = Math.max(8, HEX_SIZE * 0.22);
+          const x1 = mx - nx*half, y1 = my - ny*half;
+          const x2 = mx + nx*half, y2 = my + ny*half;
+
+          const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+          line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+          line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+          line.setAttribute('stroke', getComputedStyle(document.documentElement).getPropertyValue('--edge-closed').trim());
+          line.setAttribute('stroke-width', '3');
+          line.setAttribute('stroke-linecap', 'round');
+          edgesSvg.appendChild(line);
+        }
+      }
+    }
+
+    // Used tiles as labeled hex nodes (passive)
+    function drawNodes(){
+      nodesLayer.innerHTML = '';
+      for(const id in locations){
+        const c = centers[id]; if(!c) continue;
+        const node = document.createElement('div');
+        node.className = 'node';
+        node.style.left = `${c.x}px`;
+        node.style.top  = `${c.y}px`;
+        const hex = document.createElement('div');
+        hex.className = 'hex';
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = (locations[id].name || id);
+        hex.appendChild(label);
+        node.appendChild(hex);
+        nodesLayer.appendChild(node);
+      }
+    }
+
+    // ---- Top bar population ----
+    function summarizeNames(list, max=3){
+      const names = (list||[]).map(x=>x.name||x.id);
+      if(names.length <= max) return names.join(', ') || '—';
+      return names.slice(0,max).join(', ') + '…';
+    }
+    function setDropdown(container, items, emptyText){
+      container.innerHTML = '';
+      if(!items || !items.length){
+        const div = document.createElement('div'); div.className='item empty'; div.textContent = emptyText; container.appendChild(div); return;
+      }
+      for(const it of items){
+        const div = document.createElement('div'); div.className='item'; div.textContent = it.name || it.id; container.appendChild(div);
+      }
+    }
+    function updateTopbar(st){
+      try{
+        const inv = st.player.inventory_resolved || [];
+        invSummary.textContent = summarizeNames(inv, 3);
+        setDropdown(invDropdown, inv, 'Inventory is empty.');
+
+        const eqPrimary = st.player.equipped_primary_label || '—';
+        equipValue.textContent = eqPrimary || '—';
+
+        const hereNpcs = st.location.occupants_resolved || [];
+        npcsSummary.textContent = hereNpcs.length ? summarizeNames(hereNpcs, 2) : '—';
+        setDropdown(npcsDropdown, hereNpcs, 'No one is around.');
+
+        const hereItems = st.location.items_resolved || [];
+        itemsSummary.textContent = hereItems.length ? summarizeNames(hereItems, 2) : '—';
+        setDropdown(itemsDropdown, hereItems, 'Nothing noteworthy.');
+      }catch(e){}
+    }
+
+    // ---- Action Log ----
+    function appendLog(text, muted=false){
+      if(!text) return;
+      const el = document.createElement('div');
+      el.className = 'logline' + (muted ? ' log-muted' : '');
+      el.textContent = text;
+      const atBottom = (logList.scrollTop + logList.clientHeight + 8) >= logList.scrollHeight;
+      logList.appendChild(el);
+      // Trim
+      while(logList.children.length > 200){
+        logList.removeChild(logList.firstChild);
+      }
+      if(atBottom) logList.scrollTop = logList.scrollHeight;
+    }
+
+    function synthesizeLog(prev, next){
+      if(!prev || !next) return;
+      try{
+        // arrivals/leavings
+        const pset = new Set((prev.location.occupants_resolved||[]).map(x=>x.id));
+        const nset = new Set((next.location.occupants_resolved||[]).map(x=>x.id));
+        for(const nid of nset){
+          if(!pset.has(nid)){
+            const name = (next.location.occupants_resolved||[]).find(x=>x.id===nid)?.name || nid;
+            appendLog(`${name} arrives.`);
+          }
+        }
+        for(const nid of pset){
+          if(!nset.has(nid)){
+            const name = (prev.location.occupants_resolved||[]).find(x=>x.id===nid)?.name || nid;
+            appendLog(`${name} leaves.`);
+          }
+        }
+        // item changes
+        const pitems = new Set((prev.location.items_resolved||[]).map(x=>x.id));
+        const nitems = new Set((next.location.items_resolved||[]).map(x=>x.id));
+        for(const iid of nitems){ if(!pitems.has(iid)){ const name = (next.location.items_resolved||[]).find(x=>x.id===iid)?.name || iid; appendLog(`${name} is now here.`); } }
+        for(const iid of pitems){ if(!nitems.has(iid)){ const name = (prev.location.items_resolved||[]).find(x=>x.id===iid)?.name || iid; appendLog(`${name} is no longer here.`); } }
+      }catch(e){}
+    }
+
+    // ---- Live updates ----
+    const socket = io();
+    socket.on('state_update', async ()=>{
+      await pullLocations();
+      await pullState();
+    });
+    socket.on('log_line', (payload)=>{
+      if(payload && payload.text){
+        appendLog(payload.text);
+      }
+    });
+
+    // ---- Init ----
+    (async function(){
+      await pullLocations();
+      await pullState();
+      applyTf();
+      window.addEventListener('resize', ()=> drawGrid());
+    })();
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,17 @@
+{
+  "id": "alley",
+  "occupants": [],
+  "items": [],
+  "sublocations": [],
+  "transient_effects": [],
+  "connections_state": {
+    "tavern": {
+      "status": "open",
+      "direction": "W"
+    },
+    "town_square": {
+      "status": "open",
+      "direction": "NE"
+    }
+  }
+}

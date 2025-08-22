@@ -1,0 +1,31 @@
+{
+  "id": "npc_enemy",
+  "name": "Angry Peasant",
+  "inventory": [],
+  "slots": {
+    "main_hand": null,
+    "off_hand": null,
+    "head": null,
+    "torso": "item_leather_armor_1",
+    "legs": null
+  },
+  "hp": 5,
+  "memories": [],
+  "goals": [],
+  "relationships": {},
+  "tags": {
+    "inherent": [],
+    "dynamic": []
+  },
+  "next_available_tick": 0,
+  "attributes": {
+    "strength": 11,
+    "dexterity": 12,
+    "constitution": 10
+  },
+  "skills": {
+    "unarmed_combat": "novice"
+  },
+  "last_meal_tick": 0,
+  "hunger_stage": "sated"
+}

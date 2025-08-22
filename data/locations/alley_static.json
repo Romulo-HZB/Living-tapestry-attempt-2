@@ -1,0 +1,10 @@
+{
+  "id": "alley",
+  "description": "A narrow alleyway with cobblestones and shadowed corners.",
+  "tags": {
+    "inherent": []
+  },
+  "hex_connections": {
+    "NE": "town_square"
+  }
+}

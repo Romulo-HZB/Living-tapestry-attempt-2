@@ -1,0 +1,31 @@
+{
+  "id": "npc_sample",
+  "name": "Sample NPC",
+  "inventory": [],
+  "slots": {
+    "main_hand": null,
+    "off_hand": null,
+    "head": null,
+    "torso": null,
+    "legs": null
+  },
+  "hp": 10,
+  "memories": [],
+  "goals": [],
+  "relationships": {},
+  "tags": {
+    "inherent": [],
+    "dynamic": []
+  },
+  "next_available_tick": 0,
+  "attributes": {
+    "strength": 12,
+    "dexterity": 11,
+    "constitution": 10
+  },
+  "skills": {
+    "skill_swords": "novice"
+  },
+  "last_meal_tick": 0,
+  "hunger_stage": "sated"
+}

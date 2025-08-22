@@ -1,0 +1,10 @@
+{
+  "id": "tavern",
+  "description": "A cozy tavern with worn wooden tables and the smell of roasted meat.",
+  "tags": {
+    "inherent": []
+  },
+  "hex_connections": {
+    "SW": "town_square"
+  }
+}

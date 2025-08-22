@@ -1,0 +1,11 @@
+{
+  "endpoint": "http://26.112.115.236:1234/v1/chat/completions",
+  "model": "qwen3-4b-thinking-2507",
+  "max_context": -1,
+  "api_key": "",
+  "extra_headers": {},
+  "memory": {
+    "perception_buffer_size": 30,
+    "retrieval_top_k": 6
+  }
+}

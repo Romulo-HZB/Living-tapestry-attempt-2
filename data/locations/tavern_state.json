@@ -1,0 +1,20 @@
+{
+  "id": "tavern",
+  "occupants": [],
+  "items": [],
+  "sublocations": [
+    "common_room",
+    "upstairs_room"
+  ],
+  "transient_effects": [],
+  "connections_state": {
+    "town_square": {
+      "status": "open",
+      "direction": "SW"
+    },
+    "alley": {
+      "status": "open",
+      "direction": "E"
+    }
+  }
+}

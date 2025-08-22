@@ -1,0 +1,61 @@
+{
+  "id": "npc_blacksmith",
+  "name": "Rurik the Blacksmith",
+  "inventory": [],
+  "slots": {
+    "main_hand": null,
+    "off_hand": null,
+    "head": null,
+    "torso": null,
+    "legs": null
+  },
+  "hp": 12,
+  "memories": [
+    {"tick": -20, "event_type": "work", "actor_id": "npc_blacksmith", "payload": {"content": "Reforged a bent plowshare; farmer paid with cider."}},
+    {"tick": -18, "event_type": "talk", "actor_id": "npc_blacksmith", "payload": {"content": "Guard Halvar mentioned thefts of small nails."}},
+    {"tick": -16, "event_type": "work", "actor_id": "npc_blacksmith", "payload": {"content": "Quenched a dagger; blade warped slightly—needs rework."}},
+    {"tick": -14, "event_type": "observe", "actor_id": "npc_blacksmith", "payload": {"content": "Saw muddy prints near the scrap barrel."}},
+    {"tick": -12, "event_type": "trade", "actor_id": "npc_blacksmith", "payload": {"content": "Bought low-grade iron from a newcomer, price seemed too good."}},
+    {"tick": -10, "event_type": "work", "actor_id": "npc_blacksmith", "payload": {"content": "Spent the morning hammering a horseshoe."}},
+    {"tick": -8,  "event_type": "talk", "actor_id": "npc_blacksmith", "payload": {"content": "Bartered for coal with a merchant."}},
+    {"tick": -6,  "event_type": "assist", "actor_id": "npc_blacksmith", "payload": {"content": "Sharpened a kitchen knife for the innkeep, gratis."}},
+    {"tick": -4,  "event_type": "plan", "actor_id": "npc_blacksmith", "payload": {"content": "Set aside scrap to craft nails and sell cheaply."}}
+  ],
+  "goals": [
+    {"short_term": "Source better iron to avoid warped blades", "priority": "high"},
+    {"short_term": "Craft a batch of nails to undercut the thief's supply", "priority": "medium"},
+    {"medium_term": "Earn a contract to maintain guard gear", "priority": "high"},
+    {"long_term": "Teach an apprentice to expand production", "priority": "long"},
+    {"social": "Trade tips with Halvar and Lysa; reward leads with free sharpening", "priority": "ongoing"}
+  ],
+  "relationships": {
+    "npc_sample": "acquaintance",
+    "npc_enemy": "wary",
+    "npc_guard": "respect",
+    "npc_bard": "fond"
+  },
+  "tags": {
+    "inherent": ["profession_blacksmith", "stout", "pragmatic"],
+    "dynamic": []
+  },
+  "next_available_tick": 0,
+  "attributes": {
+    "strength": 14,
+    "dexterity": 10,
+    "constitution": 13,
+    "charisma": 10
+  },
+  "skills": {
+    "smithing": "journeyman",
+    "unarmed_combat": "novice",
+    "barter": "apprentice",
+    "repair": "journeyman"
+  },
+  "last_meal_tick": 0,
+  "hunger_stage": "sated",
+  "known_locations": {
+    "market_square": "stall",
+    "town_square": "deliveries",
+    "tavern": "clients"
+  }
+}

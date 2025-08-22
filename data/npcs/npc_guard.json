@@ -1,0 +1,60 @@
+{
+  "id": "npc_guard",
+  "name": "Sergeant Halvar",
+  "inventory": [],
+  "slots": {
+    "main_hand": null,
+    "off_hand": null,
+    "head": null,
+    "torso": null,
+    "legs": null
+  },
+  "hp": 11,
+  "memories": [
+    {"tick": -18, "event_type": "talk", "actor_id": "npc_guard", "payload": {"content": "Met with the captain; assigned to double patrols after dusk."}},
+    {"tick": -16, "event_type": "patrol", "actor_id": "npc_guard", "payload": {"content": "Noted a loose latch on the east gate. Needs fixing."}},
+    {"tick": -14, "event_type": "observe", "actor_id": "npc_guard", "payload": {"content": "Saw the bard chatting with a cloaked stranger near the fountain."}},
+    {"tick": -12, "event_type": "assist", "actor_id": "npc_guard", "payload": {"content": "Helped a merchant lift a fallen crate. Back twinged."}},
+    {"tick": -10, "event_type": "patrol", "actor_id": "npc_guard", "payload": {"content": "Spoke with Rurik about a report of stolen nails. He suspects the same kid."}},
+    {"tick": -8, "event_type": "investigate", "actor_id": "npc_guard", "payload": {"content": "Found muddy footprints leading toward the market stalls."}},
+    {"tick": -6, "event_type": "patrol", "actor_id": "npc_guard", "payload": {"content": "Walked the perimeter of the town square."}},
+    {"tick": -4, "event_type": "observe", "actor_id": "npc_guard", "payload": {"content": "Cautioned a drunk peasant; he staggered off toward the tavern."}},
+    {"tick": -2, "event_type": "talk", "actor_id": "npc_guard", "payload": {"content": "Warned a rowdy peasant to calm down."}}
+  ],
+  "goals": [
+    {"short_term": "Inspect the east gate latch before nightfall", "priority": "high"},
+    {"short_term": "Question market vendors about petty thefts", "priority": "medium"},
+    {"medium_term": "Identify the repeat thief targeting small metal goods", "priority": "high"},
+    {"long_term": "Earn promotion to watch-lieutenant by keeping peace consistently", "priority": "long"},
+    {"social": "Maintain cordial relations with Rurik (blacksmith) and Lysa (bard) to get tips", "priority": "ongoing"}
+  ],
+  "relationships": {
+    "npc_enemy": "wary",
+    "npc_sample": "neutral",
+    "npc_blacksmith": "respect",
+    "npc_bard": "tolerant"
+  },
+  "tags": {
+    "inherent": ["profession_guard", "dutiful", "stern"],
+    "dynamic": []
+  },
+  "next_available_tick": 0,
+  "attributes": {
+    "strength": 13,
+    "dexterity": 11,
+    "constitution": 12,
+    "charisma": 9
+  },
+  "skills": {
+    "intimidation": "novice",
+    "unarmed_combat": "apprentice",
+    "investigation": "apprentice"
+  },
+  "last_meal_tick": 0,
+  "hunger_stage": "sated",
+  "known_locations": {
+    "town_square": "post",
+    "market_square": "patrol_route",
+    "tavern": "trouble_spot"
+  }
+}

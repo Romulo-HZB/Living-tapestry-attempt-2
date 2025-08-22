@@ -1,0 +1,9 @@
+{
+  "id": "item_rusty_sword_1",
+  "blueprint_id": "rusty_sword",
+  "current_location": "market_square",
+  "owner_id": null,
+  "item_state": {},
+  "inventory": [],
+  "tags": {"inherent": [], "dynamic": []}
+}

@@ -1,0 +1,63 @@
+{
+  "id": "npc_bard",
+  "name": "Lysa the Bard",
+  "inventory": [],
+  "slots": {
+    "main_hand": null,
+    "off_hand": null,
+    "head": null,
+    "torso": null,
+    "legs": null
+  },
+  "hp": 8,
+  "memories": [
+    {"tick": -22, "event_type": "travel", "actor_id": "npc_bard", "payload": {"content": "Arrived from the south road; cold wind, warm welcome at the tavern."}},
+    {"tick": -20, "event_type": "compose", "actor_id": "npc_bard", "payload": {"content": "Sketched verses about a watchful guard and a market's murmur."}},
+    {"tick": -18, "event_type": "talk", "actor_id": "npc_bard", "payload": {"content": "Heard rumors of a petty thief with muddy boots."}},
+    {"tick": -16, "event_type": "perform", "actor_id": "npc_bard", "payload": {"content": "Played a lively reel at the tavern; innkeep promised stew."}},
+    {"tick": -14, "event_type": "observe", "actor_id": "npc_bard", "payload": {"content": "Saw Rurik haggle; he looked troubled about supplies."}},
+    {"tick": -12, "event_type": "practice", "actor_id": "npc_bard", "payload": {"content": "Practiced lute tremolos; tripped on the bridge section again."}},
+    {"tick": -10, "event_type": "perform", "actor_id": "npc_bard", "payload": {"content": "Sang a ballad in the square, passersby smiled."}},
+    {"tick": -8,  "event_type": "talk", "actor_id": "npc_bard", "payload": {"content": "Asked a merchant about night sounds; a latch rattling near the east gate."}},
+    {"tick": -6,  "event_type": "observe", "actor_id": "npc_bard", "payload": {"content": "Noted scuffed footprints under a market stall."}},
+    {"tick": -4,  "event_type": "talk", "actor_id": "npc_bard", "payload": {"content": "Sang a ballad in the square, passersby smiled."}},
+    {"tick": -2,  "event_type": "work", "actor_id": "npc_bard", "payload": {"content": "Practiced lute chords, still rusty on the bridge."}}
+  ],
+  "goals": [
+    {"short_term": "Finish a song that weaves local rumors (gate latch, muddy boots)", "priority": "high"},
+    {"short_term": "Perform at market to gather tips and gossip", "priority": "medium"},
+    {"medium_term": "Broker introductions between townsfolk to spark stories", "priority": "medium"},
+    {"long_term": "Compose an epic about small heroes keeping the peace", "priority": "long"},
+    {"social": "Support Halvar and Rurik with morale and news; earn meals by song", "priority": "ongoing"}
+  ],
+  "relationships": {
+    "npc_sample": "friendly",
+    "npc_enemy": "cautious",
+    "npc_blacksmith": "acquaintance",
+    "npc_guard": "respectful"
+  },
+  "tags": {
+    "inherent": ["profession_bard", "curious", "cheerful"],
+    "dynamic": []
+  },
+  "next_available_tick": 0,
+  "attributes": {
+    "strength": 8,
+    "dexterity": 12,
+    "constitution": 9,
+    "charisma": 15
+  },
+  "skills": {
+    "performance": "journeyman",
+    "diplomacy": "apprentice",
+    "gossip": "apprentice",
+    "composition": "apprentice"
+  },
+  "last_meal_tick": 0,
+  "hunger_stage": "sated",
+  "known_locations": {
+    "market_square": "busking_spot",
+    "town_square": "stage",
+    "tavern": "lodgings"
+  }
+}

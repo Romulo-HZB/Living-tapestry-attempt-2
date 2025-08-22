@@ -1,0 +1,29 @@
+{
+  "rusty_sword": {
+    "name": "Rusty Sword",
+    "weight": 3,
+    "damage_dice": "1d6",
+    "damage_type": "slashing",
+    "skill_tag": "skill_swords",
+    "armour_rating": 0,
+    "properties": []
+  },
+  "leather_armor": {
+    "name": "Leather Armor",
+    "weight": 5,
+    "damage_dice": "1d2",
+    "damage_type": "bludgeoning",
+    "skill_tag": "unarmed_combat",
+    "armour_rating": 1,
+    "properties": []
+  },
+  "apple": {
+    "name": "Apple",
+    "weight": 1,
+    "damage_dice": "1d1",
+    "damage_type": "bludgeoning",
+    "skill_tag": "unarmed_combat",
+    "armour_rating": 0,
+    "properties": ["food"]
+  }
+}

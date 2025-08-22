@@ -1,0 +1,3672 @@
+# Monolithic export of engine/game code
+# Project root: C:\Users\romul\OneDrive\Área de Trabalho\Living-tapestry-attempt-1-main
+# Generated: 2025-08-07T00:42:13.949659
+# Included roots: engine/, rpg/
+# Order: sorted paths
+
+
+====================================================================================================
+FILE: engine/__init__.py
+====================================================================================================
+
+"""Engine package exports"""
+
+from .world_state import WorldState
+from .simulator import Simulator
+from .llm_client import LLMClient
+from .narrator import Narrator
+
+__all__ = ["WorldState", "Simulator", "LLMClient", "Narrator"]
+
+====================================================================================================
+FILE: engine/data_models.py
+====================================================================================================
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Literal
+
+
+@dataclass
+class Memory:
+    text: str = ""
+    tick: int = 0
+    priority: Literal["low", "normal", "high"] = "normal"
+    status: Literal["active", "recalled", "archived", "consolidated"] = "active"
+    source_id: Optional[str] = None
+    confidence: float = 1.0
+    is_secret: bool = False
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class PerceptionEvent:
+    event_type: str = "generic"
+    tick: int = 0
+    actor_id: Optional[str] = None
+    # Some downstream serializers expect target_ids and location_id; include them explicitly.
+    target_ids: List[str] = field(default_factory=list)
+    location_id: Optional[str] = None
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class Goal:
+    text: str = ""
+    type: str = "note"
+    priority: Literal["low", "normal", "high"] = "normal"
+    status: Literal["active", "pending", "done", "cancelled"] = "active"
+    payload: Dict[str, Any] = field(default_factory=dict)
+    expiry_tick: Optional[int] = None
+
+@dataclass
+class NPC:
+    id: str
+    name: str
+    inventory: List[str] = field(default_factory=list)
+    slots: Dict[str, Optional[str]] = field(default_factory=dict)
+    hp: int = 0
+    # Long-term memory (LTM) stored on disk
+    memories: List[Memory] = field(default_factory=list)
+    # Structured goals (permission_granted, go_to, seek_and_use, etc.)
+    goals: List[Goal] = field(default_factory=list)
+    relationships: Dict[str, str] = field(default_factory=dict)
+    tags: Dict[str, List[str]] = field(default_factory=lambda: {"inherent": [], "dynamic": []})
+    # Short-term memory (STM) buffer for recent perception events
+    short_term_memory: List[PerceptionEvent] = field(default_factory=list)
+    # Core memories/beliefs always included in prompts
+    core_memories: List[Memory] = field(default_factory=list)
+    known_locations: Dict[str, str] = field(default_factory=dict)
+    next_available_tick: int = 0
+    last_meal_tick: int = 0
+    hunger_stage: str = "sated"
+    attributes: Dict[str, int] = field(
+        default_factory=lambda: {"strength": 10, "dexterity": 10, "constitution": 10}
+    )
+    skills: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LocationStatic:
+    id: str
+    description: str
+    tags: Dict[str, List[str]] = field(default_factory=lambda: {"inherent": []})
+    hex_connections: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LocationState:
+    id: str
+    occupants: List[str] = field(default_factory=list)
+    items: List[str] = field(default_factory=list)
+    sublocations: List[str] = field(default_factory=list)
+    transient_effects: List[str] = field(default_factory=list)
+    connections_state: Dict[str, dict] = field(default_factory=dict)
+
+@dataclass
+class ItemBlueprint:
+    id: str
+    name: str
+    weight: int = 0
+    damage_dice: str = "1d4"
+    damage_type: str = "bludgeoning"
+    armour_rating: int = 0
+    skill_tag: str = "unarmed_combat"
+    properties: List[str] = field(default_factory=list)
+
+@dataclass
+class ItemInstance:
+    id: str
+    blueprint_id: str
+    current_location: Optional[str] = None
+    owner_id: Optional[str] = None
+    item_state: Dict[str, Any] = field(default_factory=dict)
+    inventory: List[str] = field(default_factory=list)
+    tags: Dict[str, List[str]] = field(default_factory=lambda: {"inherent": [], "dynamic": []})
+
+====================================================================================================
+FILE: engine/events.py
+====================================================================================================
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+from .data_models import PerceptionEvent
+
+
+@dataclass
+class Event:
+    """Core event envelope passed through the simulator."""
+    event_type: str
+    tick: int
+    actor_id: str
+    target_ids: List[str] = field(default_factory=list)
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+
+# Conversation-related lightweight types (kept optional to avoid circular deps)
+@dataclass
+class ConversationSnapshot:
+    """Minimal snapshot for narration/debugging. Not a full state container."""
+    conversation_id: str
+    participants: List[str]
+    current_speaker: Optional[str]
+    turn_order: List[str]
+    last_interaction_tick: int
+
+
+# Perception utilities
+def make_perception_from_event(origin: Event, location_id: Optional[str] = None) -> PerceptionEvent:
+    """
+    Convert a core Event into a PerceptionEvent summary for NPC short-term memory.
+    This intentionally strips details that are not needed for NPC reasoning prompts.
+    """
+    return PerceptionEvent(
+        event_type=origin.event_type,
+        tick=origin.tick,
+        actor_id=origin.actor_id,
+        location_id=location_id,
+        payload=origin.payload.copy()
+    )
+
+====================================================================================================
+FILE: engine/llm_client.py
+====================================================================================================
+
+import json
+import re
+from pathlib import Path
+from typing import List, Dict, Optional
+from urllib import request, error
+
+
+class LLMClient:
+    """Simple connector to an OpenAI-compatible endpoint (e.g., OpenRouter)."""
+
+    def __init__(self, config_path: Optional[Path] = None, path: Optional[Path] = None):
+        # Support both param names for convenience
+        config_path = config_path or path or Path("config/llm.json")
+        cfg = {}
+        try:
+            with open(config_path, "r") as f:
+                cfg = json.load(f)
+        except FileNotFoundError:
+            # Provide a clearer message and safe defaults for offline/dev runs
+            print(f"[LLMClient] Config file not found at '{config_path}'. Using safe defaults.")
+            cfg = {
+                "endpoint": "http://localhost:11434/v1/chat/completions",
+                "model": "gpt-4o-mini",
+                "max_output_tokens": 256,
+                "api_key": "",
+                "extra_headers": {},
+            }
+        except Exception as e:
+            print(f"[LLMClient] Failed to load config '{config_path}': {e}. Using safe defaults.")
+            cfg = {
+                "endpoint": "http://localhost:11434/v1/chat/completions",
+                "model": "gpt-4o-mini",
+                "max_output_tokens": 256,
+                "api_key": "",
+                "extra_headers": {},
+            }
+        self.endpoint = cfg.get("endpoint")
+        self.model = cfg.get("model")
+        # Deprecated: max_context (was incorrectly used for completion length)
+        # New: max_output_tokens controls completion length only.
+        self.max_output_tokens = cfg.get("max_output_tokens", cfg.get("max_context", -1))
+        self.api_key = cfg.get("api_key")
+        self.extra_headers = cfg.get("extra_headers", {})
+
+    def chat(self, messages: List[Dict[str, str]]) -> str:
+        # Request the model to ONLY return a JSON object; no prose.
+        # Add an assistant-side system instruction to enforce JSON output.
+        sys_guard = {
+            "role": "system",
+            "content": "Output must be ONLY a single JSON object, no prose, no code fences. If you produce hidden reasoning, wrap it in <think>...</think> BEFORE the JSON."
+        }
+        # Prepend guard if not already present
+        msgs = [sys_guard] + messages
+
+        payload = {
+            "model": self.model,
+            "messages": msgs,
+        }
+        # Only use OpenAI-style response_format when talking to providers that support it (e.g., OpenRouter)
+        if isinstance(self.endpoint, str) and "openrouter.ai" in self.endpoint:
+            payload["response_format"] = {"type": "json_object"}
+        # Enable debug logging of raw requests/responses
+        debug = True
+        if self.max_output_tokens != -1:
+            # Limit completion length only (does not affect prompt size)
+            payload["max_tokens"] = self.max_output_tokens
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        for k, v in (self.extra_headers or {}).items():
+            headers[k] = v
+
+        req = request.Request(
+            self.endpoint,
+            data=json.dumps(payload).encode(),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            if debug:
+                # Print outbound request (truncated) for troubleshooting
+                print("[LLMClient] Request payload:", json.dumps(payload)[:500])
+                # Removed no-op legacy checks for 'max_context'.
+            # Allow long-thinking local models: increase timeout substantially
+            with request.urlopen(req, timeout=600) as resp:
+                raw = resp.read().decode()
+                if debug:
+                    # Print raw response length and first chars; also dump to a file for full inspection
+                    print("[LLMClient] Raw response length:", len(raw))
+                    print("[LLMClient] Raw response head:", raw[:200].replace("\n","\\n"))
+                    # Write the full response to a temp file for user inspection
+                    try:
+                        with open("llm_last_response.txt", "w", encoding="utf-8") as f:
+                            f.write(raw)
+                        print("[LLMClient] Full raw response saved to llm_last_response.txt")
+                    except Exception as _e:
+                        print("[LLMClient] Failed to write llm_last_response.txt:", _e)
+                    # Also store a structured file matching OpenAI-like JSON for easier downstream logging
+                    try:
+                        with open("llm_last_full.json", "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                if not raw or not raw.strip():
+                    raise RuntimeError("Empty response from LLM")
+                # Some providers (including OpenRouter) support a beta response_format and may still return JSON content in choices.
+                data = json.loads(raw)
+        except error.HTTPError as e:
+            try:
+                body = e.read().decode()
+            except Exception:
+                body = ""
+            if debug:
+                print("[LLMClient] HTTPError:", e.code, e.reason, body[:1000])
+            # Return empty JSON string to keep caller stable but expose details in console
+            return "{}"
+        except error.URLError as e:
+            if debug:
+                print("[LLMClient] URLError:", e.reason)
+            return "{}"
+        except json.JSONDecodeError as e:
+            if debug:
+                print("[LLMClient] JSONDecodeError on response")
+            # As a fallback for non-JSON or HTML error bodies, return a minimal empty JSON command string
+            return "{}"
+
+        # Try OpenAI-compatible chat format
+        content = None
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except Exception:
+            # Fallback: some providers may return a 'content' at top-level or a 'text' key
+            if isinstance(data, dict):
+                if "content" in data and isinstance(data["content"], str):
+                    content = data["content"]
+                elif "text" in data and isinstance(data["text"], str):
+                    content = data["text"]
+
+        if not isinstance(content, str):
+            # Final fallback to empty JSON to keep engine stable
+            return "{}"
+        return content
+
+    def extract_think(self, text: str) -> Optional[str]:
+        """
+        Extract the FIRST hidden reasoning block wrapped in <think>...</think> (or <thought>/<reasoning>).
+        Returns the inner text trimmed, or None if not present.
+        Non-destructive: does not modify any state or files.
+        """
+        if not isinstance(text, str):
+            return None
+        m = re.search(r"(?is)<\s*(think|thought|reasoning)\s*>(.*?)<\s*/\s*\1\s*>", text)
+        if not m:
+            return None
+        return (m.group(2) or "").strip()
+
+    def _strip_think_and_extract_json(self, text: str) -> Optional[dict]:
+        """
+        Remove any <think>...</think> or similar hidden reasoning tags and try to parse JSON.
+        If direct parse fails, extract the last JSON object block and parse it.
+        More robust to multiple think blocks and surrounding whitespace.
+        """
+        if not isinstance(text, str):
+            return None
+        # Normalize newlines/whitespace a bit
+        txt = text.strip()
+        # Remove ALL hidden reasoning blocks, case-insensitive, including nested appearances
+        # Use a loop to remove repeatedly in case multiple blocks occur
+        pattern = re.compile(r"(?is)<\s*(think|thought|reasoning)\s*>.*?<\s*/\s*\1\s*>")
+        prev = None
+        while prev != txt:
+            prev = txt
+            txt = pattern.sub("", txt)
+        cleaned = txt.strip()
+        # Try direct JSON first
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            pass
+        # Fallback: find the last balanced {...} block
+        brace_stack: list = []
+        start_idx = -1
+        last_json = None
+        for i, ch in enumerate(cleaned):
+            if ch == "{":
+                if not brace_stack:
+                    start_idx = i
+                brace_stack.append("{")
+            elif ch == "}":
+                if brace_stack:
+                    brace_stack.pop()
+                    if not brace_stack and start_idx != -1:
+                        candidate = cleaned[start_idx:i+1]
+                        last_json = candidate
+                        start_idx = -1
+        if last_json:
+            try:
+                return json.loads(last_json)
+            except Exception:
+                return None
+        return None
+
+    def parse_command(self, user_input: str, system_prompt: str, system_prompt_override: Optional[str] = None, additional_context: Optional[dict] = None) -> Dict[str, str]:
+        sys_prompt = system_prompt_override or system_prompt
+        user_payload = user_input
+        if additional_context is not None:
+            # Provide additional context as a JSON block preceding the user text
+            user_payload = json.dumps({"context": additional_context, "input": user_input})
+
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_payload},
+        ]
+        reply = self.chat(messages)
+        parsed = self._strip_think_and_extract_json(reply)
+        if isinstance(parsed, dict):
+            return parsed
+        # Final fallback to empty dict to keep engine stable
+        return {}
+
+====================================================================================================
+FILE: engine/narrator.py
+====================================================================================================
+
+from __future__ import annotations
+
+from typing import Optional, Dict, Any
+
+from .events import Event
+from .world_state import WorldState
+from rpg import combat_rules
+
+
+class Narrator:
+    """Simple component turning events into plain text descriptions."""
+
+    def __init__(self, world: WorldState):
+        self.world = world
+        # Dispatch table to avoid a long if/elif chain
+        self.renderers = {
+            "describe_location": self._r_describe_location,
+            "move": self._r_move,
+            "grab": self._r_grab,
+            "drop": self._r_drop,
+            "eat": self._r_eat,
+            "attack_attempt": self._r_attack_attempt,
+            "attack_hit": self._r_attack_hit,
+            "attack_missed": self._r_attack_missed,
+            "damage_applied": self._r_damage_applied,
+            "talk": self._r_talk,
+            "scream": self._r_scream,
+            "talk_loud": self._r_talk_loud,
+            "inventory": self._r_inventory,
+            "stats": self._r_stats,
+            "equip": self._r_equip,
+            "unequip": self._r_unequip,
+            "analyze": self._r_analyze,
+            "give": self._r_give,
+            "toggle_starvation": self._r_toggle_starvation,
+            "open_connection": self._r_open_connection,
+            "close_connection": self._r_close_connection,
+            "npc_died": self._r_npc_died,
+            "wait": self._r_wait,
+            "rest": self._r_rest,
+        }
+
+    def render(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        handler = self.renderers.get(event.event_type)
+        if handler:
+            return handler(event, extra)
+        return ""
+
+    # Renderers
+
+    def _r_describe_location(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        description = event.payload.get("description", "")
+        occupants = event.payload.get("occupants", [])
+        items = event.payload.get("items", [])
+        parts = [description]
+        if occupants:
+            parts.append("You see: " + ", ".join(occupants))
+        if items:
+            parts.append("Items here: " + ", ".join(items))
+        return " ".join(parts).strip()
+
+    def _r_move(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        loc = self.world.get_location_static(event.target_ids[0])
+        # Prefer a concise name/label if available; fallback to a shortened description
+        label = getattr(loc, "name", None)
+        if not label or not isinstance(label, str) or not label.strip():
+            desc = getattr(loc, "description", "") or ""
+            label = desc.split(".")[0].strip()[:60] or desc[:60]
+        return f"{actor.name} moves to {label}."
+
+    def _r_grab(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        item = self.world.get_item_instance(event.target_ids[0])
+        bp = self.world.get_item_blueprint(item.blueprint_id)
+        return f"{actor.name} picks up {bp.name}."
+
+    def _r_drop(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        item = self.world.get_item_instance(event.target_ids[0])
+        bp = self.world.get_item_blueprint(item.blueprint_id)
+        return f"{actor.name} drops {bp.name}."
+
+    def _r_eat(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        item_name = event.payload.get("item_name", "something")
+        return f"{actor.name} eats {item_name}."
+
+    def _r_attack_attempt(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        attacker = self.world.get_npc(event.actor_id)
+        target = self.world.get_npc(event.target_ids[0])
+        weapon = combat_rules.get_weapon(self.world, attacker)
+        return f"{attacker.name} attacks {target.name} with {weapon.name}."
+
+    def _r_attack_hit(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        attacker = self.world.get_npc(event.actor_id)
+        target = self.world.get_npc(event.target_ids[0])
+        return (
+            f"{attacker.name} hits {target.name} "
+            f"(roll {event.payload['to_hit']} vs AC {event.payload['target_ac']})"
+        )
+
+    def _r_attack_missed(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        attacker = self.world.get_npc(event.actor_id)
+        target = self.world.get_npc(event.target_ids[0])
+        return (
+            f"{attacker.name} misses {target.name} "
+            f"(roll {event.payload['to_hit']} vs AC {event.payload['target_ac']})"
+        )
+
+    def _r_damage_applied(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        target = self.world.get_npc(event.target_ids[0])
+        amount = event.payload.get("amount", 0)
+        dmg_type = event.payload.get("damage_type", "")
+        return f"{target.name} takes {amount} {dmg_type} damage (HP: {target.hp})"
+
+    def _r_talk(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        speaker = self.world.get_npc(event.actor_id)
+        content = event.payload.get("content", "")
+        # Prefer structured payload for recipient, fallback to target_ids
+        recipient_id = event.payload.get("recipient_id") or (event.target_ids[0] if event.target_ids else None)
+        if recipient_id:
+            target = self.world.get_npc(recipient_id)
+            return f"{speaker.name} to {target.name}: {content}"
+        if event.payload.get("interject") and event.payload.get("conversation_id"):
+            return f"{speaker.name} interjects: {content}"
+        return f"{speaker.name} says: {content}"
+
+    def _r_scream(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        speaker = self.world.get_npc(event.actor_id)
+        content = event.payload.get("content", "")
+        return f"{speaker.name} screams: {content}"
+
+    def _r_talk_loud(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        speaker = self.world.get_npc(event.actor_id)
+        content = event.payload.get("content", "")
+        return f"{speaker.name} shouts: {content}"
+
+    def _r_inventory(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        items = event.payload.get("items", [])
+        if items:
+            return f"{actor.name} carries: {', '.join(items)}"
+        return f"{actor.name} carries nothing."
+
+    def _r_stats(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        hp = event.payload.get("hp", 0)
+        attrs = event.payload.get("attributes", {})
+        skills = event.payload.get("skills", {})
+        hunger = event.payload.get("hunger_stage")
+        parts = [f"HP: {hp}"]
+        if attrs:
+            attr_str = ", ".join(f"{k}: {v}" for k, v in attrs.items())
+            parts.append(f"Attributes: {attr_str}")
+        if skills:
+            skill_str = ", ".join(f"{k} ({v})" for k, v in skills.items())
+            parts.append(f"Skills: {skill_str}")
+        if hunger:
+            parts.append(f"Hunger: {hunger}")
+        return f"{actor.name} stats - " + "; ".join(parts)
+
+    def _r_equip(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        item = self.world.get_item_instance(event.target_ids[0])
+        bp = self.world.get_item_blueprint(item.blueprint_id)
+        slot = event.payload.get("slot", "")
+        return f"{actor.name} equips {bp.name} to {slot}."
+
+    def _r_unequip(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        item = self.world.get_item_instance(event.target_ids[0])
+        bp = self.world.get_item_blueprint(item.blueprint_id)
+        slot = event.payload.get("slot", "")
+        return f"{actor.name} removes {bp.name} from {slot}."
+
+    def _r_analyze(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        name = event.payload.get("name", "")
+        weight = event.payload.get("weight")
+        damage = event.payload.get("damage_dice")
+        dmg_type = event.payload.get("damage_type")
+        armour = event.payload.get("armour_rating")
+        props = event.payload.get("properties", [])
+        parts = [f"{name} (weight {weight})"]
+        if damage:
+            parts.append(f"Damage: {damage} {dmg_type}")
+        if armour:
+            parts.append(f"Armour rating: {armour}")
+        if props:
+            parts.append("Properties: " + ", ".join(props))
+        return " ".join(parts)
+
+    def _r_give(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        # Prefer structured payload if available
+        item_id = event.payload.get("item_id") or (event.target_ids[0] if event.target_ids else None)
+        recipient_id = event.payload.get("recipient_id") or (event.target_ids[1] if len(event.target_ids) > 1 else None)
+        if not item_id or not recipient_id:
+            return ""
+        item = self.world.get_item_instance(item_id)
+        target = self.world.get_npc(recipient_id)
+        bp = self.world.get_item_blueprint(item.blueprint_id)
+        return f"{actor.name} gives {bp.name} to {target.name}."
+
+    def _r_toggle_starvation(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        enabled = event.payload.get("enabled", True)
+        return "Starvation enabled." if enabled else "Starvation disabled."
+
+    def _r_open_connection(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        loc = self.world.get_location_static(event.target_ids[0])
+        return f"{actor.name} opens the way to {loc.description}."
+
+    def _r_close_connection(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        loc = self.world.get_location_static(event.target_ids[0])
+        return f"{actor.name} closes the way to {loc.description}."
+
+    def _r_npc_died(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        return f"{actor.name} dies."
+
+    def _r_wait(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        ticks = event.payload.get("ticks", 1)
+        if ticks == 1:
+            return f"{actor.name} waits."
+        return f"{actor.name} waits for {ticks} ticks."
+
+    def _r_rest(self, event: Event, extra: Optional[Dict[str, Any]] = None) -> str:
+        actor = self.world.get_npc(event.actor_id)
+        ticks = event.payload.get("ticks", 1)
+        healed = event.payload.get("healed", 0)
+        if ticks == 1:
+            return f"{actor.name} rests and recovers {healed} HP."
+        return f"{actor.name} rests for {ticks} ticks and recovers {healed} HP."
+
+====================================================================================================
+FILE: engine/npc_planner.py
+====================================================================================================
+
+from typing import Dict, Optional, Any, List, Tuple
+from .llm_client import LLMClient
+from .data_models import Memory
+import json
+import re
+
+PLANNER_SYSTEM_PROMPT = (
+    "You are an action planner for a deterministic text-sim.\n"
+    "Return ONLY a single JSON object: {\"tool\": string, \"params\": object} or null.\n"
+    "No prose, no code fences.\n"
+    "Valid tools: [\"move\",\"talk\",\"talk_loud\",\"scream\",\"look\",\"grab\",\"drop\",\"attack\",\"inventory\",\"stats\",\"equip\",\"unequip\",\"analyze\",\"eat\",\"give\",\"open\",\"close\",\"toggle_starvation\",\"wait\",\"rest\",\"interject\",\"leave_conversation\"].\n"
+    "Rules:\n"
+    "- Choose exactly one tool per turn.\n"
+    "- Keep params minimal and valid; prefer IDs from context.\n"
+    "- If no sensible action, return null.\n"
+    "- If in a conversation and not current speaker, return null.\n"
+    "- Working memory is provided; consider goals, core memories, and recent perceptions when deciding.\n"
+    "- When idle: prefer varied low-impact actions like talk with short emotes (e.g., \"nods.\", \"hums.\"), or wait; avoid repeating the same action consecutively.\n"
+    "- Avoid selecting \"look\" more than once every 5 turns; use it sparingly.\n"
+    "- Use \"move\" only to open neighbors.\n"
+    "- Use \"attack\" only if co-located and context justifies.\n"
+    "- For durations like wait/rest without a number, use ticks=1.\n"
+    "\n"
+    "Embodiment and action:\n"
+    "You are controlling a single embodied actor in a physical world. Choose exactly one concrete next action that physically advances the actor’s goal (e.g., move toward a target, open/close a door, talk/talk_loud when speech itself advances the goal).\n"
+    "\n"
+    "Navigation:\n"
+    "If you intend to \"investigate\" something not in your current location, choose move toward the relevant neighbor. Use neighbors and connections_state from context.location to pick a valid target location. If a connection is closed, choose open (or close when appropriate) or try an alternate route.\n"
+    "\n"
+    "Targeted speech:\n"
+    "Only use talk/talk_loud when speech itself advances the goal. When speaking to someone present, include target_id to direct speech. If the relevant person is elsewhere, move toward a likely location instead of just promising to go.\n"
+    "\n"
+    "Avoid empty promises:\n"
+    "Do not merely announce intentions. Act: if you say you will check a gate or room, actually move toward it.\n"
+    "\n"
+    "Repetition hint:\n"
+    "You receive repetition_hint = {last_tool_by_actor, avoid_repeat_within, look_cooldown}. Do not pick last_tool_by_actor again within avoid_repeat_within turns unless necessary. Avoid 'look' if within look_cooldown. If you previously indicated you would investigate, prefer move next.\n"
+    "\n"
+    "Hidden reasoning:\n"
+    "Before deciding, write brief hidden reasoning inside <think>...</think>. Then output ONLY one JSON object with the command.\n"
+)
+
+def _tokenize(text: str) -> List[str]:
+    text = (text or "").lower()
+    return re.findall(r"[a-z0-9_]+", text)
+
+def _score_memory(keywords: List[str], m: Memory) -> float:
+    if not isinstance(m, Memory):
+        # Legacy dict fallback
+        blob = json.dumps(m, ensure_ascii=False)
+        txt = blob
+        tick = (m.get("tick") if isinstance(m, dict) else 0) or 0
+        score = 0.0
+        for k in keywords:
+            if k in txt.lower():
+                score += 1.0
+        # recency boost
+        score += min(2.0, tick / 100000.0)
+        return score
+    score = 0.0
+    txt = f"{m.text} {json.dumps(m.payload, ensure_ascii=False)}".lower()
+    for k in keywords:
+        if k in txt:
+            score += 1.0
+    # status weighting
+    if getattr(m, "status", "active") == "archived":
+        score *= 0.6
+    elif getattr(m, "status", "active") in {"recalled", "active"}:
+        score *= 1.0
+    elif getattr(m, "status", "active") == "consolidated":
+        score *= 1.2
+    # confidence weighting
+    try:
+        score *= max(0.3, min(1.2, float(getattr(m, "confidence", 1.0))))
+    except Exception:
+        pass
+    # recency boost
+    try:
+        score += min(2.0, float(getattr(m, "tick", 0)) / 100000.0)
+    except Exception:
+        pass
+    return score
+
+def _memory_to_dict(m: Any) -> Any:
+    try:
+        # Avoid importing dataclasses.asdict to keep deps light; Memory likely has __dict__
+        if isinstance(m, Memory):
+            return {
+                "text": getattr(m, "text", ""),
+                "tick": getattr(m, "tick", 0),
+                "priority": getattr(m, "priority", "normal"),
+                "status": getattr(m, "status", "active"),
+                "source_id": getattr(m, "source_id", None),
+                "confidence": getattr(m, "confidence", 1.0),
+                "is_secret": getattr(m, "is_secret", False),
+                "payload": getattr(m, "payload", {}) or {},
+            }
+        if isinstance(m, dict):
+            return m
+    except Exception:
+        pass
+    return m
+
+def build_working_memory(context: Dict[str, Any], retrieval_top_k: int = 6, max_stm: int = 10) -> Dict[str, Any]:
+    """
+    Build a compact working memory slice from actor data:
+    - goals (top few)
+    - core_memories
+    - short_term_memory (recent perception events)
+    - retrieved long-term memories (keyword search)
+    """
+    actor = context.get("actor") or {}
+    wm: Dict[str, Any] = {}
+    # goals
+    goals = (actor.get("goals") or []) if isinstance(actor.get("goals"), list) else []
+    wm["goals"] = goals[:5]
+    # core memories
+    core = (actor.get("core_memories") or []) if isinstance(actor.get("core_memories"), list) else []
+    wm["core_memories"] = core[:10]
+    # short-term perception
+    stm = (actor.get("short_term_memory") or []) if isinstance(actor.get("short_term_memory"), list) else []
+    wm["perceptions"] = stm[-max_stm:]
+    # build keyword set from recent perception payloads + conversation + location/topic hints
+    keywords: List[str] = []
+    # actor name/id
+    for k in _tokenize(actor.get("name") or "") + _tokenize(actor.get("id") or ""):
+        if k not in keywords:
+            keywords.append(k)
+    # location/topic
+    loc = context.get("location") or {}
+    for k in _tokenize((loc.get("static") or {}).get("description") or ""):
+        if k not in keywords:
+            keywords.append(k)
+    convo = context.get("conversation") or {}
+    for h in (convo.get("history") or [])[-4:]:
+        if isinstance(h, dict):
+            for k in _tokenize(h.get("content") or ""):
+                if k not in keywords:
+                    keywords.append(k)
+    for p in stm[-max_stm:]:
+        if isinstance(p, dict):
+            payload = p.get("payload") or {}
+            for k in _tokenize(json.dumps(payload, ensure_ascii=False)):
+                if k not in keywords:
+                    keywords.append(k)
+    # retrieve from LTM provided in context.actor.memories if present; planner gets NPC objects indirectly,
+    # but the simulator currently passes persona without full memories. If present, use it. Else, empty list.
+    ltm: List[Any] = actor.get("memories") or []
+    scored: List[Tuple[float, Any]] = []
+    for m in ltm:
+        try:
+            if isinstance(m, Memory):
+                scored.append((_score_memory(keywords, m), m))
+            else:
+                scored.append((_score_memory(keywords, m), m))
+        except Exception:
+            continue
+    scored.sort(key=lambda t: t[0], reverse=True)
+    top = [m for _, m in scored[:retrieval_top_k]]
+    # Ensure JSON-safe
+    wm["retrieved_memories"] = [_memory_to_dict(m) for m in top]
+    # Also ensure core/goals/perceptions are JSON-safe if they accidentally contain dataclasses
+    wm["core_memories"] = [_memory_to_dict(m) for m in wm.get("core_memories", [])]
+    # Ensure Goal dataclasses are serializable
+    def _goal_to_dict(g: Any) -> Any:
+        if isinstance(g, dict):
+            return g
+        try:
+            return {
+                "text": getattr(g, "text", ""),
+                "type": getattr(g, "type", "note"),
+                "priority": getattr(g, "priority", "normal"),
+                "status": getattr(g, "status", "active"),
+                "payload": getattr(g, "payload", {}) or {},
+                "expiry_tick": getattr(g, "expiry_tick", None),
+            }
+        except Exception:
+            return getattr(g, "__dict__", g)
+    wm["goals"] = [_goal_to_dict(g) for g in wm.get("goals", [])]
+    # PerceptionEvent dataclasses may appear; convert robustly
+    def _perception_to_dict(p: Any) -> Any:
+        if isinstance(p, dict):
+            return p
+        try:
+            return {
+                "event_type": getattr(p, "event_type", getattr(p, "type", "")),
+                "tick": getattr(p, "tick", 0),
+                "actor_id": getattr(p, "actor_id", None),
+                "target_ids": list(getattr(p, "target_ids", []) or []),
+                "payload": getattr(p, "payload", {}) or {},
+                "location_id": getattr(p, "location_id", None),
+            }
+        except Exception:
+            return getattr(p, "__dict__", p)
+    wm["perceptions"] = [_perception_to_dict(p) for p in wm.get("perceptions", [])]
+    return wm
+
+class NPCPlanner:
+    def __init__(self, llm: Optional[LLMClient] = None) -> None:
+        self.llm = llm or LLMClient()
+
+    def plan(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Compose repetition hints from STM
+        stm = ((context.get("actor") or {}).get("short_term_memory") or [])
+        last_tool = None
+        actor_id = (context.get("actor") or {}).get("id")
+        for m in reversed(stm[-6:]):
+            if isinstance(m, dict) and m.get("actor_id") == actor_id:
+                last_tool = m.get("event_type")
+                break
+        repetition_hint = {"last_tool_by_actor": last_tool, "avoid_repeat_within": 2, "look_cooldown": 5}
+
+        # Build working memory slice and attach to the context sent to the model
+        working_memory = build_working_memory(context)
+
+        # Sanitize actor.memories in the outer context to avoid dataclass leakage
+        ctx_copy = dict(context)
+        actor_copy = dict(ctx_copy.get("actor") or {})
+        if isinstance(actor_copy.get("memories"), list):
+            actor_copy["memories"] = [_memory_to_dict(m) for m in actor_copy["memories"]]
+        if isinstance(actor_copy.get("core_memories"), list):
+            actor_copy["core_memories"] = [_memory_to_dict(m) for m in actor_copy["core_memories"]]
+        # Sanitize goals as well
+        def _goal_to_dict(g: Any) -> Any:
+            if isinstance(g, dict):
+                return g
+            try:
+                return {
+                    "text": getattr(g, "text", ""),
+                    "type": getattr(g, "type", "note"),
+                    "priority": getattr(g, "priority", "normal"),
+                    "status": getattr(g, "status", "active"),
+                    "payload": getattr(g, "payload", {}) or {},
+                    "expiry_tick": getattr(g, "expiry_tick", None),
+                }
+            except Exception:
+                return getattr(g, "__dict__", g)
+        if isinstance(actor_copy.get("goals"), list):
+            actor_copy["goals"] = [_goal_to_dict(g) for g in actor_copy["goals"]]
+        # Sanitize short_term_memory as well (PerceptionEvent)
+        if isinstance(actor_copy.get("short_term_memory"), list):
+            def _perception_to_dict(p: Any) -> Any:
+                if isinstance(p, dict):
+                    return p
+                try:
+                    return {
+                        "event_type": getattr(p, "event_type", getattr(p, "type", "")),
+                        "tick": getattr(p, "tick", 0),
+                        "actor_id": getattr(p, "actor_id", None),
+                        "target_ids": list(getattr(p, "target_ids", []) or []),
+                        "payload": getattr(p, "payload", {}) or {},
+                        "location_id": getattr(p, "location_id", None),
+                    }
+                except Exception:
+                    return getattr(p, "__dict__", p)
+            actor_copy["short_term_memory"] = [_perception_to_dict(p) for p in actor_copy["short_term_memory"]]
+        # Ensure available_tools is JSON-serializable (it may contain objects in some paths)
+        if isinstance(ctx_copy.get("available_tools"), list):
+            ctx_copy["available_tools"] = [t if isinstance(t, str) else str(getattr(t, "name", t)) for t in ctx_copy["available_tools"]]
+        ctx_copy["actor"] = actor_copy
+
+        # Optionally add a concise neighbor names mapping to aid navigation if available in location static data.
+        # This is additive context only; engine/tool schemas remain unchanged.
+        loc_static = ((context.get("location") or {}).get("static") or {})
+        neighbor_names = {}
+        try:
+            # If static location data exposes neighbor metadata, include short labels
+            # Expecting something like {"neighbors": {"loc_id": {"name": "East Gate"}}}
+            ns = (loc_static.get("neighbors") or {})
+            if isinstance(ns, dict):
+                for nid, nmeta in ns.items():
+                    if isinstance(nmeta, dict):
+                        label = nmeta.get("name") or nmeta.get("label") or str(nid)
+                    else:
+                        label = str(nmeta)
+                    neighbor_names[str(nid)] = str(label)[:40]
+        except Exception:
+            neighbor_names = {}
+
+        user_payload = {
+            "context": ctx_copy,
+            "working_memory": working_memory,
+            "repetition_hint": repetition_hint,
+            "neighbor_names": neighbor_names,
+            "input": "Decide the next action. Respect repetition_hint.last_tool_by_actor and avoid repeating the same tool within repetition_hint.avoid_repeat_within turns. Do not choose look if last use was within look_cooldown turns."
+        }
+        messages = [
+            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ]
+        reply = self.llm.chat(messages)
+        extractor = getattr(self.llm, "_strip_think_and_extract_json", None)
+        parsed = extractor(reply) if callable(extractor) else None
+
+        if parsed is None:
+            return None
+        if isinstance(parsed, dict):
+            tool = parsed.get("tool")
+            params = parsed.get("params", {})
+            if tool is None or (isinstance(tool, str) and tool.strip().lower() in {"null", "none"}):
+                return None
+            if not isinstance(params, dict):
+                params = {}
+            valid_tools = {
+                "move","talk","talk_loud","scream","look","grab","drop","attack",
+                "inventory","stats","equip","unequip","analyze","eat","give",
+                "open","close","toggle_starvation","wait","rest","interject","leave_conversation",
+                # Intentionally excluding reason/reflect unless explicitly enabled
+            }
+            if tool not in valid_tools:
+                return None
+            # Defensive normalization for frequent LLM mistakes:
+            # - accept 'target' or 'target_id' for attack, convert to 'target_ids' list if engine expects that
+            if tool == "attack":
+                tgt = params.get("target_id") or params.get("target") or params.get("target_ids")
+                if isinstance(tgt, list):
+                    # keep first if list provided
+                    params = {"target_id": tgt[0] if tgt else None}
+                elif isinstance(tgt, str):
+                    params = {"target_id": tgt}
+                else:
+                    # invalid intent; let simulator reject gracefully
+                    params = {}
+            # - For talk, ensure 'content' is a short string
+            if tool in {"talk","talk_loud","scream"}:
+                content = params.get("content")
+                if not isinstance(content, str):
+                    params["content"] = "..."
+                else:
+                    params["content"] = content[:200]
+            # - For move, accept either 'target' or 'location_id'
+            if tool == "move":
+                loc = params.get("location_id") or params.get("target") or params.get("to")
+                if isinstance(loc, str):
+                    params = {"location_id": loc}
+            return {"tool": tool, "params": params}
+        return None
+
+====================================================================================================
+FILE: engine/simulator.py
+====================================================================================================
+
+from __future__ import annotations
+
+from typing import Dict, Any, List, Optional, Protocol, Tuple
+import random
+import json
+import math
+
+from .world_state import WorldState
+from .events import Event, make_perception_from_event
+from .data_models import NPC, PerceptionEvent
+import json as _json_for_cfg  # local alias to avoid shadowing
+from .tools.base import Tool
+from .narrator import Narrator
+from rpg import combat_rules
+from .llm_client import LLMClient
+# Optional UI renderer is injected externally; no import here to keep engine headless by default.
+
+class RendererProtocol(Protocol):
+    def set_board(self, top_locations: List[str], sublocations_map: Dict[str, List[str]]) -> None: ...
+    def update_state(self, actors: List[Dict[str, Any]], messages: Dict[str, Any]) -> None: ...
+    def run_once(self) -> Optional[Tuple[str, Any]]: ...
+    def shutdown(self) -> None: ...
+
+
+class Simulator:
+    # NOTE: Backwards-compat alias kept for compatibility. Prefer run_one_npc_turn().
+    def run_npc_round(self) -> bool:
+        """Deprecated alias. Use run_one_npc_turn()."""
+        return self.run_one_npc_turn()
+
+    def run_one_npc_turn(self) -> bool:
+        """Execute exactly one NPC (blocking on LLM). Do NOT advance time here.
+        Returns True if an NPC acted; False if the cycle completed (no NPC acted)."""
+        try:
+            from .npc_planner import NPCPlanner
+            planner = NPCPlanner(getattr(self, "llm", None))
+        except Exception:
+            planner = None
+
+        world = self.world
+        player_id = getattr(self, "player_id", None)
+
+        # Initialize or refresh turn order at cycle boundaries
+        if not self.npc_turn_order or self.current_npc_index >= len(self.npc_turn_order):
+            self.npc_turn_order = sorted([nid for nid in getattr(world, "npcs", {}).keys() if nid != player_id])
+            self.current_npc_index = 0
+            if not self.npc_turn_order:
+                return False  # No NPCs at all
+
+        # Find the next eligible NPC for this single step
+        while self.current_npc_index < len(self.npc_turn_order):
+            nid = self.npc_turn_order[self.current_npc_index]
+            self.current_npc_index += 1
+
+            npc = world.npcs.get(nid)
+            if not npc:
+                continue
+            # Skip dead NPCs
+            if "dead" in getattr(npc, "tags", {}).get("dynamic", []):
+                continue
+            # If actor is busy, skip this tick for that NPC (time will advance after an action below)
+            if getattr(npc, "next_available_tick", 0) > self.game_tick:
+                continue
+
+            # Build compact context for planner
+            loc_id = getattr(npc, "location_id", None)
+            location_static = getattr(world, "locations_static", {}).get(loc_id, {})
+            location_state = getattr(world, "locations_state", {}).get(loc_id, {})
+            visible_npcs = location_state.get("occupants", [])
+            visible_items = location_state.get("items", [])
+            neighbors = list((location_state.get("connections_state") or {}).keys())
+
+            persona = {
+                "id": getattr(npc, "id", nid),
+                "name": getattr(npc, "name", nid),
+                "hp": getattr(npc, "hp", None),
+                "attributes": getattr(npc, "attributes", {}),
+                "skills": getattr(npc, "skills", {}),
+                "tags": getattr(npc, "tags", {}),
+                "short_term_memory": getattr(npc, "short_term_memory", []),
+                # Expose LTM and core memories/goals so planner and LLM can use them directly.
+                "memories": getattr(npc, "memories", []),
+                "core_memories": getattr(npc, "core_memories", []),
+                "goals": getattr(npc, "goals", []),
+            }
+            # Build live conversation snapshot for this actor from Simulator state
+            convo_snapshot = None
+            try:
+                convo_id = self.actor_conversation.get(nid)
+                if convo_id and convo_id in self.conversations:
+                    c = self.conversations[convo_id]
+                    convo_snapshot = {
+                        "conversation_id": c.get("conversation_id"),
+                        "participants": c.get("participants", []),
+                        "current_speaker": c.get("current_speaker"),
+                        "turn_order": c.get("turn_order", []),
+                        "last_interaction_tick": c.get("last_interaction_tick"),
+                    }
+            except Exception:
+                convo_snapshot = None
+
+            ctx = {
+                "game_tick": getattr(world, "game_tick", 0),
+                "actor": persona,
+                "location": {
+                    "id": loc_id,
+                    "static": {
+                        "name": location_static.get("name"),
+                        "description": location_static.get("description"),
+                    },
+                    "neighbors": neighbors,
+                    "connections_state": location_state.get("connections_state", {}),
+                    "occupants": visible_npcs,
+                    "items": visible_items,
+                },
+                "available_tools": ["move","talk","talk_loud","scream","look","grab","drop","attack","inventory","stats","equip","unequip","analyze","eat","give","open","close","toggle_starvation","wait","rest","interject","leave_conversation"],
+                "recent_memories": getattr(world, "recent_memories", []),
+                "conversation": convo_snapshot,
+            }
+
+            # Blocking LLM call for exactly one NPC
+            action = None
+            if planner is not None:
+                try:
+                    action = planner.plan(ctx)
+                    # If available, log hidden reasoning from last LLM response to run log (non-fatal)
+                    try:
+                        from .llm_client import LLMClient as _LLM
+                        extractor = _LLM().extract_think
+                        raw = ""
+                        try:
+                            with open("llm_last_response.txt", "r", encoding="utf-8") as f:
+                                raw = f.read()
+                        except Exception:
+                            raw = ""
+                        if raw:
+                            think = extractor(raw)
+                            if think:
+                                print(f"[LLM think] npc_plan {nid}: {think}")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print("[NPCPlanner] Error planning for", nid, ":", e)
+
+            if isinstance(action, dict) and "tool" in action:
+                # Runtime guard: block conversation speech when it's not the actor's turn
+                try:
+                    tool_name = action.get("tool")
+                    if ctx.get("conversation") and ctx["conversation"].get("current_speaker") != nid:
+                        if tool_name in {"talk", "interject"}:
+                            # Convert blocked speech into a visible wait action so a bubble appears.
+                            action = {"tool": "wait", "params": {"ticks": 1}}
+                except Exception:
+                    pass
+
+                if action:
+                    try:
+                        self.process_command(nid, action)
+                    except Exception as e:
+                        print("[Simulator] Failed to execute NPC action for", nid, ":", e)
+
+                # Drain events produced during this NPC action synchronously without advancing time.
+                # Do NOT push renderer state on each individual event; we push once per tick in tick().
+                try:
+                    while getattr(self, "event_queue", []):
+                        ready_events = [e for e in self.event_queue if e.tick <= self.game_tick]
+                        if not ready_events:
+                            break
+                        self.event_queue = [e for e in self.event_queue if e.tick > self.game_tick]
+                        for evt in ready_events:
+                            self.handle_event(evt)
+                except Exception:
+                    pass
+
+                # Do not advance time here; advance once after the full NPC cycle completes
+                return True  # One NPC acted; stop here to avoid overload
+
+            # If planner returned no action or actor was blocked, continue scanning this cycle
+
+        # If we reached here, we exhausted the list; reset to start a new cycle next time
+        self.current_npc_index = 0
+        return False
+    def __init__(
+        self,
+        world: WorldState,
+        narrator: Optional[Narrator] = None,
+        player_id: Optional[str] = None,
+    ):
+        self.world = world
+        # Optional external renderer adapter with a simple interface:
+        #  - set_board(top_locations, sublocations_map)
+        #  - update_state(actors, messages)
+        #  - run_once() -> ("enter", loc) | ("back", None) | ("noop", None)
+        #  - shutdown()
+        self.renderer: Optional[RendererProtocol] = None
+        self.game_tick = 0
+        self.event_queue: List[Event] = []
+        self.tools: Dict[str, Tool] = {}
+        self.narrator = narrator or Narrator(world)
+        self.player_id = player_id
+        self.starvation_enabled = True
+        self.llm: Optional[LLMClient] = None  # Initialized lazily on first use
+
+        # Memory config knobs with runtime overrides from config/llm.json if present
+        self.perception_buffer_size = 30
+        self.retrieval_top_k = 6
+        try:
+            # Lazy read config; avoid hard dependency on path by asking world (if it exposes), else project default
+            import os
+            cfg_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "llm.json")
+            if os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = _json_for_cfg.load(f)
+                mem = (cfg or {}).get("memory") or {}
+                self.perception_buffer_size = int(mem.get("perception_buffer_size", self.perception_buffer_size))
+                self.retrieval_top_k = int(mem.get("retrieval_top_k", self.retrieval_top_k))
+        except Exception:
+            pass
+         
+        # Turn tracking state
+        self.current_npc_index = 0
+        self.npc_turn_order = []
+
+        # UI state
+        self._last_actor_msgs: Dict[str, str] = {}
+        self._ui_focus_location: Optional[str] = None
+        # Internal meta payload for renderer (non-actor keys)
+        self._ui_meta: Dict[str, Any] = {}
+
+        # In-memory conversation state
+        # conversations: {conversation_id: {participants, turn_order, current_speaker, start_tick, last_interaction_tick, history: [{speaker, tick, content}], location_id}}
+        self.conversations: Dict[str, Dict[str, Any]] = {}
+        # Map actor -> conversation_id (only one active conversation per actor for now)
+        self.actor_conversation: Dict[str, str] = {}
+
+        # Event dispatch table replacing long if/elif chain in handle_event
+        self.event_handlers = {
+            "describe_location": self._handle_describe_location,
+            "move": self._handle_move,
+            "grab": self._handle_grab,
+            "drop": self._handle_drop,
+            "eat": self._handle_eat,
+            "attack_attempt": self._handle_attack_attempt,
+            "attack_hit": self._handle_attack_hit,
+            "attack_missed": self._handle_attack_missed,
+            "damage_applied": self._handle_damage_applied,
+            "talk": self._handle_talk,
+            "talk_loud": self._handle_talk_loud,
+            "scream": self._handle_scream,
+            "inventory": self._handle_inventory,
+            "stats": self._handle_stats,
+            "equip": self._handle_equip,
+            "unequip": self._handle_unequip,
+            "analyze": self._handle_analyze,
+            "give": self._handle_give,
+            "toggle_starvation": self._handle_toggle_starvation,
+            "open_connection": self._handle_open_close_connection,
+            "close_connection": self._handle_open_close_connection,
+            "npc_died": self._handle_npc_died,
+            "wait": self._handle_wait,
+            "rest": self._handle_rest,
+            "leave_conversation": self._handle_leave_conversation,
+        }
+
+    def register_tool(self, tool: Tool):
+        self.tools[tool.name] = tool
+
+    def process_command(self, actor_id: str, command: Dict[str, Any]):
+        tool = self.tools.get(command["tool"])
+        actor = self.world.get_npc(actor_id)
+        if not tool:
+            raise ValueError(f"Unknown tool {command['tool']}")
+        if actor.next_available_tick > self.game_tick:
+            raise ValueError("Actor is busy")
+        params = command.get("params", {})
+        if not tool.validate_intent(params, self.world, actor):
+            raise ValueError("Invalid intent")
+
+        # Compute time cost per command to avoid shared Tool state issues.
+        time_cost = getattr(tool, "time_cost", 1)
+        if getattr(tool, "name", "") in {"wait", "rest"}:
+            try:
+                time_cost = max(1, int(params.get("ticks", 1)))
+            except Exception:
+                time_cost = 1
+
+        events = tool.generate_events(params, self.world, actor, self.game_tick)
+        self.event_queue.extend(events)
+        actor.next_available_tick = self.game_tick + time_cost
+
+    def npc_think(self, npc: NPC) -> Optional[Dict[str, Any]]:
+        """Deprecated: Use NPCPlanner.plan via run_npc_round. Retained for compatibility."""
+        try:
+            from .npc_planner import NPCPlanner
+            planner = NPCPlanner(getattr(self, "llm", None))
+        except Exception:
+            return None
+
+        # Build a minimal context similar to run_npc_round for this NPC
+        current_loc = self.world.find_npc_location(npc.id)
+        if not current_loc:
+            return None
+        loc_state = self.world.get_location_state(current_loc)
+        loc_static = self.world.get_location_static(current_loc)
+        neighbors = list(loc_state.connections_state.keys())
+        occupants = [oid for oid in loc_state.occupants if oid != npc.id]
+        items_here = list(loc_state.items)
+
+        persona = {
+            "id": npc.id,
+            "name": npc.name,
+            "hp": npc.hp,
+            "attributes": getattr(npc, "attributes", {}),
+            "skills": getattr(npc, "skills", {}),
+            "tags": npc.tags,
+            "short_term_memory": getattr(npc, "short_term_memory", []),
+            "memories": getattr(npc, "memories", []),
+            "core_memories": getattr(npc, "core_memories", []),
+            "goals": getattr(npc, "goals", []),
+        }
+
+        # Conversation snapshot from simulator state
+        convo_snapshot = None
+        try:
+            convo_id = self.actor_conversation.get(npc.id)
+            if convo_id and convo_id in self.conversations:
+                c = self.conversations[convo_id]
+                convo_snapshot = {
+                    "conversation_id": c.get("conversation_id"),
+                    "participants": c.get("participants", []),
+                    "current_speaker": c.get("current_speaker"),
+                    "turn_order": c.get("turn_order", []),
+                    "last_interaction_tick": c.get("last_interaction_tick"),
+                }
+        except Exception:
+            pass
+
+        ctx = {
+            "game_tick": getattr(self.world, "game_tick", 0),
+            "actor": persona,
+            "location": {
+                "id": current_loc,
+                "static": {
+                    "name": loc_static.name if hasattr(loc_static, "name") else getattr(loc_static, "description", ""),
+                    "description": getattr(loc_static, "description", ""),
+                },
+                "neighbors": neighbors,
+                "connections_state": getattr(loc_state, "connections_state", {}),
+                "occupants": occupants,
+                "items": items_here,
+            },
+            "available_tools": list(self.tools.keys()),
+            "recent_memories": getattr(self.world, "recent_memories", []),
+            "conversation": convo_snapshot,
+        }
+
+        action = planner.plan(ctx)
+        return action
+
+    def tick(self):
+        """
+        Advance global time by one tick, apply world passive effects (e.g. hunger),
+        and process any events scheduled for this tick. This does NOT make NPCs
+        choose actions; NPC actions are executed explicitly via run_npc_round()
+        between player turns.
+        """
+        self.game_tick += 1
+        if self.starvation_enabled:
+            hunger_events = self.world.update_hunger(self.game_tick)
+            self.event_queue.extend(hunger_events)
+
+        # Drain only events whose tick <= current
+        ready_events = [e for e in self.event_queue if e.tick <= self.game_tick]
+        self.event_queue = [e for e in self.event_queue if e.tick > self.game_tick]
+        for event in ready_events:
+            self.handle_event(event)
+        # After all events for this tick have been handled and actor bubbles recorded, update the renderer once.
+        self._renderer_push_state()
+
+    def set_renderer(self, renderer_adapter: Any):
+        """Attach a renderer adapter (pygame-based UI)."""
+        # Allow Any for call sites, but store as Protocol-typed
+        self.renderer = renderer_adapter  # type: ignore[assignment]
+        try:
+            # Build initial board from known locations and sublocations (simple: none for now)
+            top_locations = list(self.world.locations_static.keys())
+            # Build sublocations map from dynamic state (LocationState.sublocations)
+            sub_map: Dict[str, List[str]] = {}
+            for loc_id in top_locations:
+                try:
+                    loc_state = self.world.get_location_state(loc_id)
+                    subs = getattr(loc_state, "sublocations", []) or []
+                    sub_map[loc_id] = [str(s) for s in subs]
+                except Exception:
+                    sub_map[loc_id] = []
+            if hasattr(self.renderer, "set_board"):
+                self.renderer.set_board(top_locations, sub_map)  # type: ignore[call-arg]
+
+            # Seed initial connections_state snapshot for UI
+            try:
+                # Dynamic connection status snapshot (directional)
+                snapshot: Dict[str, Dict[str, Any]] = {}
+                for loc_id, loc_state in self.world.locations_state.items():
+                    cs = getattr(loc_state, "connections_state", {}) or {}
+                    snap_entry: Dict[str, Any] = {}
+                    for nid, meta in cs.items():
+                        status = (meta or {}).get("status", "open")
+                        snap_entry[str(nid)] = {"status": status}
+                    snapshot[str(loc_id)] = snap_entry
+                self._ui_meta["__connections_state__"] = snapshot
+            except Exception:
+                self._ui_meta["__connections_state__"] = {}
+
+            # Deprecated static adjacency snapshot removed: layout now derives from dynamic connections_state.
+            try:
+                # Clean any legacy key if present
+                if "__static_neighbors__" in self._ui_meta:
+                    self._ui_meta.pop("__static_neighbors__", None)
+            except Exception:
+                pass
+
+            # Track layout signature for dynamic world changes
+            try:
+                self._ui_meta["__layout_signature__"] = {
+                    "tops": sorted([str(x) for x in self.world.locations_static.keys()]),
+                    "subs": {str(k): list(map(str, getattr(self.world.get_location_state(k), "sublocations", []) or []))
+                             for k in self.world.locations_static.keys()},
+                }
+            except Exception:
+                self._ui_meta["__layout_signature__"] = {}
+
+            # Push initial state
+            self._renderer_push_state()
+        except Exception:
+            pass
+
+    def _compact_actor_list(self) -> List[Dict[str, Any]]:
+        """Build minimal list of actors with types and location labels for UI."""
+        actors: List[Dict[str, Any]] = []
+        for npc_id, npc in self.world.npcs.items():
+            loc_id = self.world.find_npc_location(npc_id)
+            if not loc_id:
+                continue
+            a_type = "player" if npc_id == self.player_id else "npc"
+            # Simple enemy detection by tag
+            if "enemy" in npc.tags.get("static", []) or "enemy" in npc.tags.get("dynamic", []):
+                a_type = "enemy"
+            # If the location state carries a chosen sublocation for this npc (optional future), read it; else None
+            subloc = None
+            try:
+                st = self.world.get_location_state(loc_id)
+                # Optional: if world stores an assignment map like occupants_by_subloc, we could read it here
+                # For now keep None; clicking into sublocation view will just show empty hexes until populated.
+            except Exception:
+                pass
+            actors.append({
+                "id": npc_id,
+                "name": npc.name,
+                "type": a_type,
+                "location": loc_id,
+                "sublocation": subloc,
+            })
+        return actors
+
+    def _renderer_push_state(self):
+        if not getattr(self, "renderer", None):
+            return
+        try:
+            # Detect structural world changes (dynamic layout) and notify renderer if needed
+            try:
+                prev_sig = (self._ui_meta or {}).get("__layout_signature__", {})
+                cur_tops = sorted([str(x) for x in self.world.locations_static.keys()])
+                cur_subs = {str(k): list(map(str, getattr(self.world.get_location_state(k), "sublocations", []) or []))
+                            for k in self.world.locations_static.keys()}
+                cur_sig = {"tops": cur_tops, "subs": cur_subs}
+                if prev_sig != cur_sig:
+                    # Update board on renderer
+                    if hasattr(self.renderer, "set_board"):
+                        self.renderer.set_board(cur_tops, cur_subs)  # type: ignore[call-arg]
+                    # Emit event-like flag so UI can optionally react
+                    self._ui_meta["world_layout_changed"] = True
+                    self._ui_meta["__layout_signature__"] = cur_sig
+                else:
+                    self._ui_meta.pop("world_layout_changed", None)
+            except Exception:
+                pass
+
+            # Merge UI meta into messages channel for renderer
+            merged_msgs = dict(self._last_actor_msgs)
+            try:
+                if self._ui_meta:
+                    for k, v in self._ui_meta.items():
+                        merged_msgs[k] = v
+                # Ensure connections_state snapshot is always present and enriched with directions
+                if "__connections_state__" not in merged_msgs:
+                    snapshot: Dict[str, Dict[str, Any]] = {}
+                    for loc_id, loc_state in self.world.locations_state.items():
+                        cs = getattr(loc_state, "connections_state", {}) or {}
+                        snap_entry: Dict[str, Any] = {}
+                        for nid, meta in cs.items():
+                            status = (meta or {}).get("status", "open")
+                            direction = (meta or {}).get("direction", None)
+                            entry: Dict[str, Any] = {"status": status}
+                            if direction:
+                                entry["direction"] = direction
+                            snap_entry[str(nid)] = entry
+                        snapshot[str(loc_id)] = snap_entry
+                    merged_msgs["__connections_state__"] = snapshot
+
+                # Derive layout neighbors dynamically from current connections_state
+                try:
+                    layout_neighbors: Dict[str, Dict[str, bool]] = {}
+                    for loc_id, loc_state in self.world.locations_state.items():
+                        cs = getattr(loc_state, "connections_state", {}) or {}
+                        undirected: Dict[str, bool] = {}
+                        for neighbor_id in cs.keys():
+                            undirected[str(neighbor_id)] = True
+                        layout_neighbors[str(loc_id)] = undirected
+                    # Keep key name for renderer compatibility
+                    merged_msgs["__static_neighbors__"] = layout_neighbors
+                except Exception as e:
+                    try:
+                        print(f"[Renderer] Failed to build dynamic layout neighbors: {e}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Optional: filter messages/actors by focused location if set (basic example)
+            actor_list = self._compact_actor_list()
+            if self._ui_focus_location:
+                try:
+                    focus = self._ui_focus_location
+                    actor_list = [a for a in actor_list if a.get("location") == focus]
+                    merged_msgs["__focus__"] = {"location": focus}
+                except Exception:
+                    pass
+
+            if hasattr(self.renderer, "update_state"):
+                self.renderer.update_state(actor_list, merged_msgs)  # type: ignore[call-arg]
+            # Allow renderer to process input and draw a frame
+            cmd = self.renderer.run_once() if hasattr(self.renderer, "run_once") else None  # type: ignore[call-arg]
+            if isinstance(cmd, tuple):
+                kind, payload = cmd
+                if kind == "enter" and isinstance(payload, str):
+                    self._ui_focus_location = payload
+                elif kind == "back":
+                    self._ui_focus_location = None
+        except Exception:
+            pass
+
+    def _record_actor_last_message(self, event: Event):
+        """Store a compact JSON message for the chat bubble of the actor."""
+        try:
+            actor_key = event.actor_id or ""
+            if not actor_key:
+                return
+
+            # Previously suppressed inventory/stats/analyze; now allow them so more actors display bubbles.
+            # No early return here; all event types can create bubbles.
+
+            # Filtered compact JSON: include only essential fields
+            msg = {"t": event.event_type}
+            if event.target_ids:
+                msg["targets"] = event.target_ids
+            if event.payload:
+                payload = dict(event.payload)
+                content = payload.get("content")
+                if isinstance(content, str):
+                    payload["content"] = content[:160]
+                msg["p"] = payload
+            self._last_actor_msgs[actor_key] = json.dumps(msg, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def handle_event(self, event: Event):
+        handler = self.event_handlers.get(event.event_type)
+        if handler:
+            handler(event)
+        else:
+            # Fallback for simple world mutations without bespoke logic
+            try:
+                print(f"[Simulator] No handler for event_type='{event.event_type}'. Applying to world and narrating.")
+            except Exception:
+                pass
+            self.world.apply_event(event)
+            msg = self.narrator.render(event)
+            if msg:
+                print(msg)
+        # Common post-processing
+        self.record_perception(event)
+        self._record_actor_last_message(event)
+        self._gc_conversations()
+
+    # --- Individual event handlers ---
+
+    def _emit_narration(self, event: Event):
+        try:
+            msg = self.narrator.render(event)
+            if msg:
+                print(msg)
+        except Exception:
+            pass
+
+    def _handle_describe_location(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_move(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_grab(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_drop(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_eat(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_attack_attempt(self, event: Event):
+        attacker = self.world.get_npc(event.actor_id)
+        target = self.world.get_npc(event.target_ids[0])
+        result = combat_rules.resolve_attack(self.world, attacker, target)
+        payload = {
+            "to_hit": result["to_hit"],
+            "target_ac": result["target_ac"],
+        }
+        if result["hit"]:
+            payload["damage"] = result["damage"]
+            self.event_queue.append(
+                Event(
+                    event_type="attack_hit",
+                    tick=self.game_tick,
+                    actor_id=event.actor_id,
+                    target_ids=event.target_ids,
+                    payload=payload,
+                )
+            )
+            self.event_queue.append(
+                Event(
+                    event_type="damage_applied",
+                    tick=self.game_tick,
+                    actor_id=event.actor_id,
+                    target_ids=event.target_ids,
+                    payload={
+                        "amount": result["damage"],
+                        "damage_type": combat_rules.get_weapon(self.world, attacker).damage_type,
+                    },
+                )
+            )
+        else:
+            self.event_queue.append(
+                Event(
+                    event_type="attack_missed",
+                    tick=self.game_tick,
+                    actor_id=event.actor_id,
+                    target_ids=event.target_ids,
+                    payload=payload,
+                )
+            )
+        self._emit_narration(event)
+
+    def _handle_attack_hit(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_attack_missed(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_damage_applied(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+        target = self.world.get_npc(event.target_ids[0])
+        if target.hp <= 0 and "dead" not in target.tags.get("dynamic", []):
+            loc_id = self.world.find_npc_location(target.id)
+            self.event_queue.append(
+                Event(
+                    event_type="npc_died",
+                    tick=self.game_tick,
+                    actor_id=target.id,
+                    target_ids=[loc_id] if loc_id else [],
+                )
+            )
+
+    def _handle_talk(self, event: Event):
+        # Conversation flow handling:
+        speaker_id = event.actor_id
+        content = event.payload.get("content", "")
+        target_id = event.payload.get("recipient_id") or (event.target_ids[0] if event.target_ids else None)
+        payload_convo_id = event.payload.get("conversation_id")
+        is_interject = bool(event.payload.get("interject"))
+        current_loc = self.world.find_npc_location(speaker_id)
+
+        if is_interject and isinstance(payload_convo_id, str):
+            convo = self.conversations.get(payload_convo_id)
+            if convo:
+                # Validate co-location with conversation location
+                if current_loc and current_loc == convo.get("location_id"):
+                    # Add if not already a participant
+                    if speaker_id not in convo["participants"]:
+                        convo["participants"].append(speaker_id)
+                        self.actor_conversation[speaker_id] = payload_convo_id
+                        # Join at end of queue
+                        if speaker_id != convo.get("current_speaker"):
+                            if speaker_id not in convo.get("turn_order", []):
+                                convo["turn_order"].append(speaker_id)
+                    # If it is their turn right now, accept line; else just log as aside without turn advance
+                    if convo.get("current_speaker") == speaker_id:
+                        convo["history"].append({"speaker": speaker_id, "tick": self.game_tick, "content": content})
+                        convo["last_interaction_tick"] = self.game_tick
+                        self._emit_narration(event)
+                        self._advance_conversation_turn(payload_convo_id, hint_target=target_id)
+                    else:
+                        # Allow interjecting content as history but don't advance turn
+                        convo["history"].append({"speaker": speaker_id, "tick": self.game_tick, "content": content})
+                        convo["last_interaction_tick"] = self.game_tick
+                        self._emit_narration(event)
+            return
+
+        # Normal talk handling
+        convo_id = self.actor_conversation.get(speaker_id)
+
+        if convo_id is None:
+            # Start a new conversation if possible
+            location_id = current_loc
+            participants = [speaker_id]
+            if target_id:
+                # Only add target if co-located
+                if self.world.find_npc_location(target_id) == location_id:
+                    participants.append(target_id)
+            if len(participants) < 2:
+                # Not enough participants for a convo; still narrate the line as standalone talk
+                self._emit_narration(event)
+            else:
+                convo_id = f"convo_{speaker_id}_{self.game_tick}"
+                self.conversations[convo_id] = {
+                    "conversation_id": convo_id,
+                    "participants": participants[:],
+                    "turn_order": [pid for pid in participants if pid != speaker_id],
+                    "current_speaker": speaker_id,
+                    "start_tick": self.game_tick,
+                    "last_interaction_tick": self.game_tick,
+                    "history": [{"speaker": speaker_id, "tick": self.game_tick, "content": content}],
+                    "location_id": location_id,
+                }
+                for pid in participants:
+                    self.actor_conversation[pid] = convo_id
+                self._emit_narration(event)
+                # Advance turn: targeted speech moves target to front if in participants
+                self._advance_conversation_turn(convo_id, hint_target=target_id)
+        else:
+            # Must be the speaker's turn
+            convo = self.conversations.get(convo_id)
+            if convo and convo.get("current_speaker") == speaker_id:
+                # Append to history and narrate
+                convo["history"].append({"speaker": speaker_id, "tick": self.game_tick, "content": content})
+                convo["last_interaction_tick"] = self.game_tick
+                self._emit_narration(event)
+                # Advance turn
+                self._advance_conversation_turn(convo_id, hint_target=target_id)
+
+    def _handle_talk_loud(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_scream(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_inventory(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_stats(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_equip(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_unequip(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_analyze(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_give(self, event: Event):
+        # Simple world mutation; expect payload with item_id/recipient_id for clarity but keep target_ids compat
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_toggle_starvation(self, event: Event):
+        self.starvation_enabled = event.payload.get("enabled", True)
+        if not self.starvation_enabled:
+            for npc in self.world.npcs.values():
+                npc.hunger_stage = "sated"
+                npc.last_meal_tick = self.game_tick
+        self._emit_narration(event)
+
+    def _handle_open_close_connection(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+        # Push a fresh connections_state snapshot to UI meta so renderer can draw open/closed edges
+        try:
+            snapshot: Dict[str, Dict[str, Any]] = {}
+            for loc_id, loc_state in self.world.locations_state.items():
+                try:
+                    # Keep only neighbor->{"status": ...}
+                    cs = getattr(loc_state, "connections_state", {}) or {}
+                    snap_entry: Dict[str, Any] = {}
+                    for nid, meta in cs.items():
+                        try:
+                            status = (meta or {}).get("status", "open")
+                        except Exception:
+                            status = "open"
+                        snap_entry[str(nid)] = {"status": status}
+                    snapshot[str(loc_id)] = snap_entry
+                except Exception:
+                    continue
+            # Store under a reserved key consumed by renderer.update_state
+            self._ui_meta["__connections_state__"] = snapshot
+        except Exception:
+            pass
+
+    def _handle_npc_died(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+        # Prune last message cache for dead actors to avoid unbounded growth
+        try:
+            if event.actor_id:
+                self._last_actor_msgs.pop(event.actor_id, None)
+        except Exception:
+            pass
+
+    def _handle_wait(self, event: Event):
+        self._emit_narration(event)
+
+    def _handle_rest(self, event: Event):
+        self.world.apply_event(event)
+        self._emit_narration(event)
+
+    def _handle_leave_conversation(self, event: Event):
+        # Remove actor from their active conversation
+        self._leave_conversation(event.actor_id)
+
+    def record_perception(self, event: Event):
+        """Add a simplified perception entry to actors in the same or adjacent locations per rules."""
+        if event.event_type in {"describe_location", "wait"}:
+            return
+
+        # Determine the primary location where the event is perceived
+        if event.event_type == "move":
+            location_id = event.target_ids[0] if event.target_ids else None
+        elif event.event_type == "npc_died":
+            location_id = event.target_ids[0] if event.target_ids else None
+        else:
+            location_id = self.world.find_npc_location(event.actor_id)
+
+        if not location_id:
+            return
+
+        recipients: set[str] = set()
+        try:
+            loc_state = self.world.get_location_state(location_id)
+            # Same-location recipients (excluding the actor)
+            for npc_id in getattr(loc_state, "occupants", []):
+                if npc_id != event.actor_id:
+                    recipients.add(npc_id)
+        except Exception:
+            pass
+
+        # Noise propagation rules
+        try:
+            if event.event_type in {"scream", "talk_loud"}:
+                loc_static = self.world.get_location_static(location_id)
+                state_here = self.world.get_location_state(location_id)
+                for neighbor_id in getattr(loc_static, "hex_connections", {}).values():
+                    conn = getattr(state_here, "connections_state", {}).get(neighbor_id, {})
+                    is_open = conn.get("status", "open") == "open"
+                    if event.event_type == "scream" or is_open:
+                        neighbor_state = self.world.get_location_state(neighbor_id)
+                        for npc_id in getattr(neighbor_state, "occupants", []):
+                            # If neighbor location has an elevated_vantage_point tag, allow perception even if door closed (visual), but this block is for audio
+                            recipients.add(npc_id)
+        except Exception:
+            pass
+
+        # Append as structured PerceptionEvent objects and cap buffer
+        for npc_id in recipients:
+            try:
+                npc = self.world.get_npc(npc_id)
+                # Elevated vantage point: allow additional cross-location perception for visual events even if door closed
+                try:
+                    visual_events = {"grab","drop","equip","unequip","attack_hit","attack_missed","damage_applied","inventory","stats","analyze"}
+                    if event.event_type in visual_events:
+                        # If recipient has elevated_vantage_point inherent tag, they can also perceive from neighbors
+                        tags = (npc.tags or {})
+                        inh = set((tags.get("inherent") or []))
+                        if "elevated_vantage_point" in inh:
+                            # No extra work here beyond inclusion; rule already increases recipients earlier
+                            pass
+                except Exception:
+                    pass
+                pe: PerceptionEvent = make_perception_from_event(event, location_id=location_id)
+                npc.short_term_memory.append(pe)
+                # Cap STM size using configured buffer
+                cap = max(1, int(getattr(self, "perception_buffer_size", 30)))
+                while len(npc.short_term_memory) > cap:
+                    npc.short_term_memory.pop(0)
+            except Exception:
+                continue
+
+    # Conversation helpers
+    def _advance_conversation_turn(self, convo_id: str, hint_target: Optional[str] = None):
+        convo = self.conversations.get(convo_id)
+        if not convo:
+            return
+        current = convo.get("current_speaker")
+        turn_order: List[str] = convo.get("turn_order", [])
+        participants: List[str] = convo.get("participants", [])
+
+        # Ensure turn_order only contains current participants except current speaker
+        turn_order = [p for p in turn_order if p in participants and p != current]
+
+        # Target rule: if hint_target in participants, move it to the front
+        if hint_target and hint_target in participants and hint_target != current:
+            # Ensure target is in queue at most once, then move to front
+            turn_order = [pid for pid in turn_order if pid != hint_target]
+            turn_order.insert(0, hint_target)
+
+        # Move current to end
+        if current and current in participants:
+            turn_order.append(current)
+
+        # Pop next speaker
+        next_speaker = turn_order.pop(0) if turn_order else None
+        convo["turn_order"] = turn_order
+        convo["current_speaker"] = next_speaker
+        convo["last_interaction_tick"] = self.game_tick
+
+        # Dissolve if fewer than 2 participants remain
+        if len(participants) < 2 or not next_speaker:
+            self._dissolve_conversation(convo_id)
+
+    def _leave_conversation(self, actor_id: str):
+        convo_id = self.actor_conversation.get(actor_id)
+        if not convo_id:
+            return
+        convo = self.conversations.get(convo_id)
+        if not convo:
+            self.actor_conversation.pop(actor_id, None)
+            return
+        participants: List[str] = convo.get("participants", [])
+        if actor_id in participants:
+            participants.remove(actor_id)
+        # Remove from queues
+        if actor_id == convo.get("current_speaker"):
+            # If others remain, immediately advance to next speaker rather than setting None
+            convo["current_speaker"] = None
+            # Advance turn to keep flow going
+            self._advance_conversation_turn(convo_id)
+        # Remove from queues
+        convo["turn_order"] = [p for p in convo.get("turn_order", []) if p != actor_id]
+        self.actor_conversation.pop(actor_id, None)
+        # Dissolve if fewer than 2 participants
+        if len(participants) < 2:
+            self._dissolve_conversation(convo_id)
+        else:
+            convo["last_interaction_tick"] = self.game_tick
+
+    def _dissolve_conversation(self, convo_id: str):
+        convo = self.conversations.pop(convo_id, None)
+        if not convo:
+            return
+        for pid in list(convo.get("participants", [])):
+            if self.actor_conversation.get(pid) == convo_id:
+                self.actor_conversation.pop(pid, None)
+
+    def _gc_conversations(self, timeout: int = 300):
+        # Remove conversations that are stale or location participants dispersed
+        to_remove = []
+        for convo_id, convo in self.conversations.items():
+            if self.game_tick - convo.get("last_interaction_tick", 0) > timeout:
+                to_remove.append(convo_id)
+                continue
+            # If participants are no longer co-located, dissolve
+            loc = convo.get("location_id")
+            if not loc:
+                continue
+            still_here = [pid for pid in convo.get("participants", []) if self.world.find_npc_location(pid) == loc]
+            if len(still_here) < 2:
+                to_remove.append(convo_id)
+        for cid in to_remove:
+            self._dissolve_conversation(cid)
+
+====================================================================================================
+FILE: engine/tools/__init__.py
+====================================================================================================
+
+from .move import MoveTool
+from .look import LookTool
+from .grab import GrabTool
+from .attack import AttackTool
+from .talk import TalkTool
+from .talk_loud import TalkLoudTool
+from .scream import ScreamTool
+from .inventory import InventoryTool
+from .drop import DropTool
+from .stats import StatsTool
+from .equip import EquipTool
+from .unequip import UnequipTool
+from .analyze import AnalyzeTool
+from .eat import EatTool
+from .give import GiveTool
+from .toggle_starvation import ToggleStarvationTool
+from .wait import WaitTool
+from .rest import RestTool
+from .conversation import InterjectTool, LeaveConversationTool
+from .open_door import OpenDoorTool
+from .close_door import CloseDoorTool
+from .reason import ReasonTool
+from .reflect import ReflectTool
+# Note: ReasonTool and ReflectTool are GM-only by default and not exposed to the planner unless explicitly enabled.
+
+__all__ = [
+    "MoveTool",
+    "LookTool",
+    "GrabTool",
+    "AttackTool",
+    "TalkTool",
+    "TalkLoudTool",
+    "ScreamTool",
+    "InventoryTool",
+    "DropTool",
+    "StatsTool",
+    "EquipTool",
+    "UnequipTool",
+    "AnalyzeTool",
+    "EatTool",
+    "GiveTool",
+    "ToggleStarvationTool",
+    "WaitTool",
+    "RestTool",
+    "InterjectTool",
+    "LeaveConversationTool",
+    "OpenDoorTool",
+    "CloseDoorTool",
+    "ReasonTool",
+    "ReflectTool",
+]
+
+====================================================================================================
+FILE: engine/tools/analyze.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class AnalyzeTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="analyze", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        item_id = intent.get("item_id")
+        if not item_id:
+            return False
+        if item_id in actor.inventory:
+            return True
+        loc_id = world.find_npc_location(actor.id)
+        if not loc_id:
+            return False
+        loc_state = world.get_location_state(loc_id)
+        return item_id in loc_state.items
+
+    def generate_events(
+        self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int
+    ) -> List[Event]:
+        item_id = intent["item_id"]
+        inst = world.get_item_instance(item_id)
+        bp = world.get_item_blueprint(inst.blueprint_id)
+        payload = {
+            "name": bp.name,
+            "weight": bp.weight,
+            "damage_dice": bp.damage_dice,
+            "damage_type": bp.damage_type,
+            "armour_rating": bp.armour_rating,
+            "properties": bp.properties,
+        }
+        return [
+            Event(
+                event_type="analyze",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[item_id],
+                payload=payload,
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/attack.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class AttackTool(Tool):
+    def __init__(self, time_cost: int = 3):
+        super().__init__(name="attack", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        target_id = intent.get("target_id")
+        if not target_id or target_id not in world.npcs:
+            return False
+        attacker_loc = world.find_npc_location(actor.id)
+        target_loc = world.find_npc_location(target_id)
+        target_npc = world.get_npc(target_id) if target_id in world.npcs else None
+        if target_npc and "dead" in target_npc.tags.get("dynamic", []):
+            return False
+        return attacker_loc is not None and attacker_loc == target_loc
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="attack_attempt",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent["target_id"]],
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/base.py
+====================================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Any, List
+
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+@dataclass
+class Tool:
+    name: str
+    time_cost: int = 1
+
+    def get_llm_prompt_fragment(self) -> str:
+        return self.name
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        raise NotImplementedError
+
+====================================================================================================
+FILE: engine/tools/close_door.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class CloseDoorTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="close", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        target = intent.get("target_location")
+        if not target or target not in world.locations_static:
+            return False
+        current = world.find_npc_location(actor.id)
+        if not current:
+            return False
+        static = world.get_location_static(current)
+        if target not in static.hex_connections.values():
+            return False
+        loc_state = world.get_location_state(current)
+        conn = loc_state.connections_state.get(target, {})
+        return conn.get("status", "open") == "open"
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="close_connection",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent["target_location"]],
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/conversation.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class InterjectTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="interject", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        # Expect conversation_id and content
+        convo_id = intent.get("conversation_id")
+        content = intent.get("content")
+        if not isinstance(convo_id, str) or not convo_id:
+            return False
+        if not isinstance(content, str) or not content:
+            return False
+        # Basic location co-presence validation will be enforced by simulator,
+        # here we just accept structure.
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        # Use standard 'talk' event with content; simulator will interpret as interjection
+        # by virtue of not being a participant yet and adding actor to convo.
+        return [
+            Event(
+                event_type="talk",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[],
+                payload={
+                    "content": intent["content"],
+                    "conversation_id": intent["conversation_id"],
+                    "interject": True,
+                },
+            )
+        ]
+
+
+class LeaveConversationTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="leave_conversation", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        # No params required
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        # Special event the simulator will handle to remove actor from conversation
+        return [
+            Event(
+                event_type="leave_conversation",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[],
+                payload={},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/drop.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class DropTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="drop", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        item_id = intent.get("item_id")
+        return bool(item_id in actor.inventory)
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="drop",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent["item_id"]],
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/eat.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class EatTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="eat", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        item_id = intent.get("item_id")
+        if not item_id or item_id not in actor.inventory:
+            return False
+        item = world.get_item_instance(item_id)
+        bp = world.get_item_blueprint(item.blueprint_id)
+        return "food" in bp.properties
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        item = world.get_item_instance(intent["item_id"])
+        bp = world.get_item_blueprint(item.blueprint_id)
+        return [
+            Event(
+                event_type="eat",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent["item_id"]],
+                payload={"item_name": bp.name},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/equip.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class EquipTool(Tool):
+    def __init__(self, time_cost: int = 2):
+        super().__init__(name="equip", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        item_id = intent.get("item_id")
+        slot = intent.get("slot")
+        if not item_id or not slot:
+            return False
+        if item_id not in actor.inventory:
+            return False
+        if slot not in actor.slots:
+            return False
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        item_id = intent["item_id"]
+        slot = intent["slot"]
+        # Provide structured payload and legacy target_ids for compatibility
+        return [
+            Event(
+                event_type="equip",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[item_id],
+                payload={
+                    "item_id": item_id,
+                    "slot": slot,
+                },
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/give.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class GiveTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="give", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        item_id = intent.get("item_id")
+        target_id = intent.get("target_id")
+        if not item_id or not target_id:
+            return False
+        if item_id not in actor.inventory:
+            return False
+        if target_id not in world.npcs:
+            return False
+        actor_loc = world.find_npc_location(actor.id)
+        target_loc = world.find_npc_location(target_id)
+        return actor_loc is not None and actor_loc == target_loc
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        item_id = intent["item_id"]
+        target_id = intent["target_id"]
+        # Populate both structured payload and legacy target_ids for compatibility
+        return [
+            Event(
+                event_type="give",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[item_id, target_id],
+                payload={
+                    "item_id": item_id,
+                    "recipient_id": target_id,
+                },
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/grab.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class GrabTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="grab", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        item_id = intent.get("item_id")
+        if not item_id or item_id not in world.item_instances:
+            return False
+        loc_id = world.find_npc_location(actor.id)
+        if not loc_id:
+            return False
+        loc_state = world.get_location_state(loc_id)
+        return item_id in loc_state.items
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="grab",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent["item_id"]],
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/inventory.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class InventoryTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="inventory", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        items = []
+        for item_id in actor.inventory:
+            instance = world.get_item_instance(item_id)
+            blueprint = world.get_item_blueprint(instance.blueprint_id)
+            items.append(blueprint.name)
+        return [
+            Event(
+                event_type="inventory",
+                tick=tick,
+                actor_id=actor.id,
+                payload={"items": items},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/look.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class LookTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="look", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        return True
+
+    def generate_events(
+        self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int
+    ) -> List[Event]:
+        loc_id = world.find_npc_location(actor.id)
+        if not loc_id:
+            return []
+
+        loc_static = world.get_location_static(loc_id)
+        loc_state = world.get_location_state(loc_id)
+
+        item_names = []
+        for item_id in loc_state.items:
+            inst = world.get_item_instance(item_id)
+            bp = world.get_item_blueprint(inst.blueprint_id)
+            item_names.append(bp.name)
+
+        occupant_names = []
+        for npc_id in loc_state.occupants:
+            if npc_id == actor.id:
+                continue
+            npc = world.get_npc(npc_id)
+            occupant_names.append(npc.name)
+
+        return [
+            Event(
+                event_type="describe_location",
+                tick=tick,
+                actor_id=actor.id,
+                payload={
+                    "description": loc_static.description,
+                    "items": item_names,
+                    "occupants": occupant_names,
+                },
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/move.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class MoveTool(Tool):
+    def __init__(self, time_cost: int = 5):
+        super().__init__(name="move", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        target = intent.get("target_location")
+        if not target or target not in world.locations_static:
+            return False
+        current = world.find_npc_location(actor.id)
+        if not current:
+            return False
+        static = world.get_location_static(current)
+        if target not in static.hex_connections.values():
+            return False
+        loc_state = world.get_location_state(current)
+        conn = loc_state.connections_state.get(target, {})
+        return conn.get("status", "open") == "open"
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        dest = intent["target_location"]
+        # Provide structured payload and legacy target_ids for compatibility
+        return [Event(
+            event_type="move",
+            tick=tick,
+            actor_id=actor.id,
+            target_ids=[dest],
+            payload={
+                "to_location_id": dest
+            },
+        )]
+
+====================================================================================================
+FILE: engine/tools/open_door.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class OpenDoorTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="open", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        target = intent.get("target_location")
+        if not target or target not in world.locations_static:
+            return False
+        current = world.find_npc_location(actor.id)
+        if not current:
+            return False
+        static = world.get_location_static(current)
+        if target not in static.hex_connections.values():
+            return False
+        loc_state = world.get_location_state(current)
+        conn = loc_state.connections_state.get(target, {})
+        return conn.get("status", "open") != "open"
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="open_connection",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent["target_location"]],
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/reason.py
+====================================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional, Literal
+
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC, Memory, Goal
+from .base import Tool
+
+
+@dataclass
+class ReasonTool(Tool):
+    """
+    Safe meta-tool for requesting state mutations that are social/cognitive:
+    - add_memory
+    - update_memory_status
+    - add_goal (including permission_granted)
+    - update_goal_status
+    - update_relationship
+    Explicitly forbids changes to hp, inventory, equipment, or locations.
+    """
+    name: str = "reason"
+    time_cost: int = 1
+
+    def get_llm_prompt_fragment(self) -> str:
+        return (
+            "reason(thought: string, desired_outcome: object)\n"
+            "Allowed desired_outcome variants:\n"
+            "- add_memory: {text, priority?, status?, source_id?, confidence?, is_secret?, payload?}\n"
+            "- update_memory_status: {match_text: string, new_status: 'active'|'recalled'|'archived'|'consolidated'}\n"
+            "- add_goal: {text, type, priority?, status?, payload?, expiry_tick?}\n"
+            "- update_goal_status: {match_text: string, new_status: 'active'|'pending'|'done'|'cancelled'}\n"
+            "- update_relationship: {target_id: string, new_status: string}\n"
+            "Forbidden: modifying hp, attributes, skills, inventory, slots, or moving actors."
+        )
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        if not isinstance(intent, dict):
+            return False
+        desired = intent.get("desired_outcome")
+        if not isinstance(desired, dict):
+            return False
+        # Hard allowlist for operation type
+        allowed_ops = {"add_memory", "update_memory_status", "add_goal", "update_goal_status", "update_relationship"}
+        op = next((k for k in desired.keys() if k in allowed_ops), None)
+        if not op:
+            return False
+
+        # Quick format checks
+        if op == "add_memory":
+            data = desired[op]
+            return isinstance(data, dict) and isinstance(data.get("text", ""), str)
+        if op == "update_memory_status":
+            data = desired[op]
+            return isinstance(data, dict) and isinstance(data.get("match_text", ""), str) and data.get("new_status") in {"active", "recalled", "archived", "consolidated"}
+        if op == "add_goal":
+            data = desired[op]
+            return isinstance(data, dict) and isinstance(data.get("text", ""), str) and isinstance(data.get("type", ""), str)
+        if op == "update_goal_status":
+            data = desired[op]
+            return isinstance(data, dict) and isinstance(data.get("match_text", ""), str) and data.get("new_status") in {"active", "pending", "done", "cancelled"}
+        if op == "update_relationship":
+            data = desired[op]
+            return isinstance(data, dict) and isinstance(data.get("target_id", ""), str) and isinstance(data.get("new_status", ""), str)
+        return False
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        """
+        This tool produces a single 'reason' event which is then applied deterministically by the world/simulator.
+        World.apply_event should implement the mutations under this allowlist.
+        """
+        thought = intent.get("thought", "")
+        desired = intent.get("desired_outcome", {})
+        payload = {
+            "thought": thought,
+            "desired_outcome": desired,
+        }
+        return [Event(event_type="reason", tick=tick, actor_id=actor.id, payload=payload)]
+
+====================================================================================================
+FILE: engine/tools/reflect.py
+====================================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional
+
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC, Memory
+from .base import Tool
+
+
+@dataclass
+class ReflectTool(Tool):
+    """
+    Reflection/consolidation tool. Allows an actor to:
+    - summarize recent events into new higher-level memories (optionally core)
+    - mark older detailed memories as consolidated/archived
+    This tool does not mutate stats/inventory/slots.
+    """
+    name: str = "reflect"
+    time_cost: int = 5  # reflection takes longer than a normal action
+
+    def get_llm_prompt_fragment(self) -> str:
+        return (
+            "reflect(thought: string, outputs: {"
+            " new_core_memories?: [{text, confidence?, is_secret?, payload?}],"
+            " new_memories?: [{text, confidence?, is_secret?, payload?}],"
+            " archive_matches?: [string],"
+            " consolidate_matches?: [string]"
+            "})"
+        )
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        if not isinstance(intent, dict):
+            return False
+        outputs = intent.get("outputs")
+        if outputs is None or not isinstance(outputs, dict):
+            return False
+        # Basic sanity checks if present
+        for key in ("new_core_memories", "new_memories"):
+            vals = outputs.get(key)
+            if vals is not None and not isinstance(vals, list):
+                return False
+        for key in ("archive_matches", "consolidate_matches"):
+            vals = outputs.get(key)
+            if vals is not None and not isinstance(vals, list):
+                return False
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        """
+        Emits a single 'reflect' event which world_state.apply_event will handle deterministically:
+        - add Memory objects to npc.core_memories or npc.memories
+        - mark matched memories as archived/consolidated based on substring matching
+        """
+        thought = intent.get("thought", "")
+        outputs = intent.get("outputs", {}) or {}
+        payload = {
+            "thought": thought,
+            "outputs": outputs,
+        }
+        return [Event(event_type="reflect", tick=tick, actor_id=actor.id, payload=payload)]
+
+====================================================================================================
+FILE: engine/tools/rest.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class RestTool(Tool):
+    """Spend time to recover hit points."""
+
+    def __init__(self, time_cost: int = 1):
+        # Allow overriding time_cost for consistency with other tools
+        super().__init__(name="rest", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        ticks = intent.get("ticks", 1)
+        return isinstance(ticks, int) and ticks >= 1
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        ticks = intent.get("ticks", 1)
+        healed = ticks  # heal 1 HP per tick
+        # Do not mutate shared Tool state; schedule narration immediately.
+        return [
+            Event(
+                event_type="rest",
+                tick=tick,
+                actor_id=actor.id,
+                payload={"ticks": ticks, "healed": healed},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/scream.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class ScreamTool(Tool):
+    """Broadcast a loud shout that can be heard in adjacent locations."""
+
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="scream", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        content = intent.get("content")
+        return isinstance(content, str) and bool(content)
+
+    def generate_events(
+        self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int
+    ) -> List[Event]:
+        return [
+            Event(
+                event_type="scream",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[],
+                payload={"content": intent["content"]},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/stats.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class StatsTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="stats", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="stats",
+                tick=tick,
+                actor_id=actor.id,
+                payload={
+                    "hp": actor.hp,
+                    "attributes": actor.attributes,
+                    "skills": actor.skills,
+                    "hunger_stage": actor.hunger_stage,
+                },
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/talk.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class TalkTool(Tool):
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="talk", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        # Expect at least 'content' string; optional 'target_id'
+        content = intent.get("content")
+        if not isinstance(content, str) or not content:
+            return False
+        target = intent.get("target_id")
+        if target is not None and target not in world.npcs:
+            return False
+        # ensure speaker and target share location if target given
+        if target:
+            actor_loc = world.find_npc_location(actor.id)
+            target_loc = world.find_npc_location(target)
+            if actor_loc != target_loc:
+                return False
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        return [
+            Event(
+                event_type="talk",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[intent.get("target_id")] if intent.get("target_id") else [],
+                payload={"content": intent["content"]},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/talk_loud.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class TalkLoudTool(Tool):
+    """Speak loudly so adjacent locations with open connections can hear."""
+
+    def __init__(self, time_cost: int = 1):
+        super().__init__(name="talk_loud", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        content = intent.get("content")
+        return isinstance(content, str) and bool(content)
+
+    def generate_events(
+        self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int
+    ) -> List[Event]:
+        return [
+            Event(
+                event_type="talk_loud",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[],
+                payload={"content": intent["content"]},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/toggle_starvation.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class ToggleStarvationTool(Tool):
+    def __init__(self, time_cost: int = 0):
+        super().__init__(name="toggle_starvation", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        return isinstance(intent.get("enabled"), bool)
+
+    def generate_events(
+        self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int
+    ) -> List[Event]:
+        return [
+            Event(
+                event_type="toggle_starvation",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[],
+                payload={"enabled": intent["enabled"]},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/unequip.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class UnequipTool(Tool):
+    def __init__(self, time_cost: int = 2):
+        super().__init__(name="unequip", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        slot = intent.get("slot")
+        if not slot:
+            return False
+        if slot not in actor.slots:
+            return False
+        if not actor.slots.get(slot):
+            return False
+        return True
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        slot = intent["slot"]
+        item_id = actor.slots[slot]
+        # Provide structured payload and legacy target_ids for compatibility
+        return [
+            Event(
+                event_type="unequip",
+                tick=tick,
+                actor_id=actor.id,
+                target_ids=[item_id],
+                payload={
+                    "item_id": item_id,
+                    "slot": slot,
+                },
+            )
+        ]
+
+====================================================================================================
+FILE: engine/tools/wait.py
+====================================================================================================
+
+from typing import Dict, Any, List
+
+from .base import Tool
+from ..events import Event
+from ..world_state import WorldState
+from ..data_models import NPC
+
+
+class WaitTool(Tool):
+    """Tool allowing an actor to deliberately pass time."""
+
+    def __init__(self, time_cost: int = 1):
+        # Allow overriding time_cost for consistency with other tools
+        super().__init__(name="wait", time_cost=time_cost)
+
+    def validate_intent(self, intent: Dict[str, Any], world: WorldState, actor: NPC) -> bool:
+        ticks = intent.get("ticks", 1)
+        return isinstance(ticks, int) and ticks >= 1
+
+    def generate_events(self, intent: Dict[str, Any], world: WorldState, actor: NPC, tick: int) -> List[Event]:
+        ticks = intent.get("ticks", 1)
+        # Do not mutate shared Tool state; narration should occur immediately.
+        return [
+            Event(
+                event_type="wait",
+                tick=tick,
+                actor_id=actor.id,
+                payload={"ticks": ticks},
+            )
+        ]
+
+====================================================================================================
+FILE: engine/world_state.py
+====================================================================================================
+
+import json
+from pathlib import Path
+from typing import Dict, Optional, Any
+
+from .data_models import (
+    NPC,
+    LocationStatic,
+    LocationState,
+    ItemBlueprint,
+    ItemInstance,
+)
+from .events import Event
+from .data_models import Memory, Goal
+
+
+class WorldState:
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        self.npcs: Dict[str, NPC] = {}
+        self.locations_static: Dict[str, LocationStatic] = {}
+        self.locations_state: Dict[str, LocationState] = {}
+        self.item_blueprints: Dict[str, ItemBlueprint] = {}
+        self.item_instances: Dict[str, ItemInstance] = {}
+
+    def load(self):
+        self._load_npcs()
+        self._load_locations()
+        self._load_items()
+        # Hydrate dynamic connection directions from static hex layout for initial world
+        try:
+            self._hydrate_connection_directions()
+        except Exception:
+            # Non-fatal; renderer can still function with status-only edges
+            pass
+        # assign current_location for items based on location state
+        for loc_id, state in self.locations_state.items():
+            for item_id in state.items:
+                inst = self.item_instances.get(item_id)
+                if inst and inst.current_location is None:
+                    inst.current_location = loc_id
+
+    def _load_npcs(self):
+        npcs_dir = self.data_dir / "npcs"
+        for path in npcs_dir.glob("*.json"):
+            with open(path, "r") as f:
+                data = json.load(f)
+            if "next_available_tick" not in data:
+                data["next_available_tick"] = 0
+            if "last_meal_tick" not in data:
+                data["last_meal_tick"] = 0
+            if "hunger_stage" not in data:
+                data["hunger_stage"] = "sated"
+            npc = NPC(**data)
+            self.npcs[npc.id] = npc
+
+    def _load_locations(self):
+        loc_dir = self.data_dir / "locations"
+        for path in loc_dir.glob("*_static.json"):
+            with open(path, "r") as f:
+                data = json.load(f)
+            loc = LocationStatic(**data)
+            self.locations_static[loc.id] = loc
+        for path in loc_dir.glob("*_state.json"):
+            with open(path, "r") as f:
+                data = json.load(f)
+            loc = LocationState(**data)
+            self.locations_state[loc.id] = loc
+
+    def _hydrate_connection_directions(self):
+        """
+        Populate connections_state[neighbor_id]['direction'] using static.hex_connections
+        for initial load. Does not overwrite an existing direction.
+        Also attempts to ensure reciprocal edges have inverse directions.
+        """
+        # Define the 6 hex directions and their inverses in axial layout naming
+        INVERSE = {
+            "north": "south",
+            "south": "north",
+            "north_east": "south_west",
+            "north-east": "south-west",
+            "northeast": "southwest",
+            "south_west": "north_east",
+            "south-west": "north-east",
+            "southwest": "northeast",
+            "south_east": "north_west",
+            "south-east": "north-west",
+            "southeast": "northwest",
+            "north_west": "south_east",
+            "north-west": "south-east",
+            "northwest": "southeast",
+            "east": "west",
+            "west": "east",
+        }
+        for loc_id, loc_static in self.locations_static.items():
+            # Get dynamic state for this location
+            state = self.locations_state.get(loc_id)
+            if not state:
+                continue
+            hex_conns = getattr(loc_static, "hex_connections", {}) or {}
+            for dir_key, neighbor_id in hex_conns.items():
+                # Ensure entry exists in dynamic map
+                entry = state.connections_state.setdefault(neighbor_id, {})
+                # Preserve existing status; default to 'open' if entirely missing
+                if "status" not in entry:
+                    entry["status"] = "open"
+                # Only set direction if absent
+                if "direction" not in entry and isinstance(dir_key, str):
+                    entry["direction"] = dir_key
+                # Also ensure reciprocal neighbor has an entry with inverse direction
+                recip = self.locations_state.get(neighbor_id)
+                if recip is not None:
+                    recip_entry = recip.connections_state.setdefault(loc_id, {})
+                    if "status" not in recip_entry:
+                        recip_entry["status"] = entry.get("status", "open")
+                    if "direction" not in recip_entry:
+                        inv = INVERSE.get(dir_key, None)
+                        if inv:
+                            recip_entry["direction"] = inv
+
+    def _load_items(self):
+        items_dir = self.data_dir / "items"
+        catalog_path = items_dir / "catalog.json"
+        if catalog_path.exists():
+            with open(catalog_path, "r") as f:
+                catalog = json.load(f)
+            for item_id, data in catalog.items():
+                blueprint = ItemBlueprint(id=item_id, **data)
+                self.item_blueprints[blueprint.id] = blueprint
+
+        instances_dir = items_dir / "instances"
+        if instances_dir.exists():
+            for path in instances_dir.glob("*.json"):
+                with open(path, "r") as f:
+                    data = json.load(f)
+                instance = ItemInstance(**data)
+                self.item_instances[instance.id] = instance
+
+    def get_npc(self, npc_id: str) -> NPC:
+        return self.npcs[npc_id]
+
+    def get_location_static(self, loc_id: str) -> LocationStatic:
+        return self.locations_static[loc_id]
+
+    def get_location_state(self, loc_id: str) -> LocationState:
+        return self.locations_state[loc_id]
+
+    def get_item_instance(self, item_id: str) -> ItemInstance:
+        return self.item_instances[item_id]
+
+    def get_item_blueprint(self, blueprint_id: str) -> ItemBlueprint:
+        return self.item_blueprints[blueprint_id]
+
+    def find_npc_location(self, npc_id: str) -> Optional[str]:
+        for loc_id, loc in self.locations_state.items():
+            if npc_id in loc.occupants:
+                return loc_id
+        return None
+
+    def update_hunger(self, current_tick: int) -> list[Event]:
+        HUNGRY_THRESHOLD = 20
+        STARVING_THRESHOLD = 40
+        events: list[Event] = []
+        for npc in self.npcs.values():
+            if "dead" in npc.tags.get("dynamic", []):
+                continue
+            ticks_since = current_tick - npc.last_meal_tick
+            if ticks_since >= STARVING_THRESHOLD:
+                npc.hunger_stage = "starving"
+                events.append(
+                    Event(
+                        event_type="damage_applied",
+                        tick=current_tick,
+                        actor_id=npc.id,
+                        target_ids=[npc.id],
+                        payload={"amount": 1, "damage_type": "starvation"},
+                    )
+                )
+            elif ticks_since >= HUNGRY_THRESHOLD:
+                npc.hunger_stage = "hungry"
+            else:
+                npc.hunger_stage = "sated"
+        return events
+
+    def apply_event(self, event):
+        if event.event_type == "move":
+            actor_id = event.actor_id
+            target = (event.target_ids[0] if event.target_ids else None)
+            if not target:
+                return
+            current_loc = self.find_npc_location(actor_id)
+            if current_loc and actor_id in self.locations_state.get(current_loc, LocationState(id=current_loc, occupants=[], items=[], connections_state={})).occupants:
+                try:
+                    self.locations_state[current_loc].occupants.remove(actor_id)
+                except ValueError:
+                    pass
+            self.locations_state.setdefault(target, LocationState(id=target, occupants=[], items=[], connections_state={})).occupants.append(actor_id)
+        elif event.event_type == "grab":
+            actor_id = event.actor_id
+            item_id = event.target_ids[0]
+            loc_id = self.find_npc_location(actor_id)
+            if loc_id and item_id in self.locations_state[loc_id].items:
+                self.locations_state[loc_id].items.remove(item_id)
+                self.npcs[actor_id].inventory.append(item_id)
+                inst = self.item_instances.get(item_id)
+                if inst:
+                    inst.owner_id = actor_id
+                    inst.current_location = None
+        elif event.event_type == "drop":
+            actor_id = event.actor_id
+            item_id = event.target_ids[0]
+            loc_id = self.find_npc_location(actor_id)
+            if loc_id and item_id in self.npcs[actor_id].inventory:
+                self.npcs[actor_id].inventory.remove(item_id)
+                self.locations_state[loc_id].items.append(item_id)
+                inst = self.item_instances.get(item_id)
+                if inst:
+                    inst.owner_id = None
+                    inst.current_location = loc_id
+        elif event.event_type == "eat":
+            actor_id = event.actor_id
+            item_id = event.target_ids[0]
+            npc = self.npcs.get(actor_id)
+            if npc and item_id in npc.inventory:
+                npc.inventory.remove(item_id)
+                self.item_instances.pop(item_id, None)
+                npc.last_meal_tick = event.tick
+                npc.hunger_stage = "sated"
+        elif event.event_type == "damage_applied":
+            target_id = event.target_ids[0]
+            amount = event.payload.get("amount", 0)
+            npc = self.npcs.get(target_id)
+            if npc:
+                npc.hp = max(npc.hp - amount, 0)
+        elif event.event_type == "rest":
+            actor_id = event.actor_id
+            healed = event.payload.get("healed", 0)
+            npc = self.npcs.get(actor_id)
+            if npc:
+                # Compute a deterministic max HP from constitution; default constitution=10.
+                constitution = npc.attributes.get("constitution", 10)
+                max_hp = max(1, constitution * 2)
+                npc.hp = min(npc.hp + healed, max_hp)
+        elif event.event_type == "equip":
+            actor_id = event.actor_id
+            item_id = event.target_ids[0]
+            slot = event.payload.get("slot")
+            npc = self.npcs.get(actor_id)
+            if npc and slot in npc.slots and item_id in npc.inventory:
+                current = npc.slots.get(slot)
+                if current:
+                    npc.inventory.append(current)
+                npc.inventory.remove(item_id)
+                npc.slots[slot] = item_id
+        elif event.event_type == "unequip":
+            actor_id = event.actor_id
+            slot = event.payload.get("slot")
+            npc = self.npcs.get(actor_id)
+            if npc and slot in npc.slots and npc.slots.get(slot):
+                item_id = npc.slots[slot]
+                npc.inventory.append(item_id)
+                npc.slots[slot] = None
+        elif event.event_type == "give":
+            actor_id = event.actor_id
+            # Prefer structured payload, fallback to target_ids for backward compatibility
+            payload = event.payload or {}
+            target_ids = event.target_ids or []
+            item_id = payload.get("item_id") or (target_ids[0] if target_ids else None)
+            target_id = payload.get("recipient_id") or (target_ids[1] if len(target_ids) > 1 else None)
+            if not item_id or not target_id:
+                return
+            giver = self.npcs.get(actor_id)
+            receiver = self.npcs.get(target_id)
+            if giver and receiver and item_id in giver.inventory:
+                try:
+                    giver.inventory.remove(item_id)
+                except ValueError:
+                    pass
+                receiver.inventory.append(item_id)
+                inst = self.item_instances.get(item_id)
+                if inst:
+                    inst.owner_id = target_id
+        elif event.event_type == "open_connection":
+            actor_loc = self.find_npc_location(event.actor_id)
+            target = event.target_ids[0]
+            if actor_loc:
+                fr = self.locations_state[actor_loc].connections_state.setdefault(target, {})
+                to = self.locations_state[target].connections_state.setdefault(actor_loc, {})
+                fr["status"] = "open"
+                to["status"] = "open"
+                # Preserve existing directions; if missing, attempt to infer from static layout
+                try:
+                    if "direction" not in fr:
+                        static = self.locations_static.get(actor_loc)
+                        if static:
+                            for d, nb in (getattr(static, "hex_connections", {}) or {}).items():
+                                if nb == target:
+                                    fr["direction"] = d
+                                    break
+                    if "direction" not in to:
+                        # Inverse of the forward direction if available
+                        inv_map = {
+                            "north": "south", "south": "north",
+                            "north_east": "south_west", "north-east": "south-west", "northeast": "southwest",
+                            "south_west": "north_east", "south-west": "north-east", "southwest": "northeast",
+                            "south_east": "north_west", "south-east": "north-west", "southeast": "northwest",
+                            "north_west": "south_east", "north-west": "south-east", "northwest": "southeast",
+                            "east": "west", "west": "east",
+                        }
+                        fdir = fr.get("direction")
+                        if isinstance(fdir, str) and fdir in inv_map:
+                            to["direction"] = inv_map[fdir]
+                except Exception:
+                    pass
+        elif event.event_type == "close_connection":
+            actor_loc = self.find_npc_location(event.actor_id)
+            target = event.target_ids[0]
+            if actor_loc:
+                self.locations_state[actor_loc].connections_state.setdefault(target, {})["status"] = "closed"
+                self.locations_state[target].connections_state.setdefault(actor_loc, {})["status"] = "closed"
+        elif event.event_type == "npc_died":
+            npc = self.npcs.get(event.actor_id)
+            if not npc:
+                return
+            loc_id = self.find_npc_location(npc.id)
+            if loc_id and npc.id in self.locations_state[loc_id].occupants:
+                self.locations_state[loc_id].occupants.remove(npc.id)
+                # Drop inventory and equipped items
+                all_items = list(npc.inventory)
+                for slot, item_id in npc.slots.items():
+                    if item_id:
+                        all_items.append(item_id)
+                        npc.slots[slot] = None
+                for item_id in all_items:
+                    self.locations_state[loc_id].items.append(item_id)
+                    inst = self.item_instances.get(item_id)
+                    if inst:
+                        inst.owner_id = None
+                        inst.current_location = loc_id
+                npc.inventory.clear()
+            # Mark as dead
+            if "dead" not in npc.tags.get("dynamic", []):
+                npc.tags.setdefault("dynamic", []).append("dead")
+        elif event.event_type == "reason":
+            # Deterministic handler for ReasonTool outcomes with a strict allowlist.
+            actor_id = event.actor_id
+            npc = self.npcs.get(actor_id)
+            if not npc:
+                return
+            desired = (event.payload or {}).get("desired_outcome") or {}
+            # Resolve which operation is requested
+            if "add_memory" in desired and isinstance(desired["add_memory"], dict):
+                data = desired["add_memory"]
+                # Build Memory with defaults and safe coercions
+                mem = Memory(
+                    text=str(data.get("text", ""))[:1000],
+                    tick=int(event.tick),
+                    priority=str(data.get("priority", "normal")),
+                    status=str(data.get("status", "active")),
+                    source_id=str(data.get("source_id")) if data.get("source_id") is not None else None,
+                    confidence=float(data.get("confidence", 1.0)),
+                    is_secret=bool(data.get("is_secret", False)),
+                    payload=dict(data.get("payload", {})) if isinstance(data.get("payload", dict)) else {},
+                )
+                npc.memories.append(mem)
+                # Keep a soft cap to prevent runaway growth (archival policy later)
+                if len(npc.memories) > 1000:
+                    # Archive oldest 50
+                    for old in npc.memories[:50]:
+                        try:
+                            old.status = "archived"
+                        except Exception:
+                            pass
+            elif "update_memory_status" in desired and isinstance(desired["update_memory_status"], dict):
+                data = desired["update_memory_status"]
+                match_text = str(data.get("match_text", "")).lower()
+                new_status = str(data.get("new_status", "active"))
+                # Update the first matching memory by substring in text or payload text
+                for m in npc.memories:
+                    try:
+                        hay = (m.text or "").lower()
+                        if match_text and match_text in hay:
+                            m.status = new_status
+                            break
+                    except Exception:
+                        # Legacy dict memory
+                        if isinstance(m, dict):
+                            hay = json.dumps(m, ensure_ascii=False).lower()
+                            if match_text and match_text in hay:
+                                m["status"] = new_status
+                                break
+                        continue
+            elif "add_goal" in desired and isinstance(desired["add_goal"], dict):
+                data = desired["add_goal"]
+                goal = Goal(
+                    text=str(data.get("text", ""))[:500],
+                    type=str(data.get("type", "note")),
+                    priority=str(data.get("priority", "normal")),
+                    status=str(data.get("status", "active")),
+                    payload=dict(data.get("payload", {})) if isinstance(data.get("payload", dict)) else {},
+                    expiry_tick=int(data.get("expiry_tick")) if data.get("expiry_tick") is not None else None,
+                )
+                npc.goals.append(goal)
+                # Optional: cap goals length
+                if len(npc.goals) > 100:
+                    npc.goals = npc.goals[-100:]
+            elif "update_goal_status" in desired and isinstance(desired["update_goal_status"], dict):
+                data = desired["update_goal_status"]
+                match_text = str(data.get("match_text", "")).lower()
+                new_status = str(data.get("new_status", "active"))
+                for g in npc.goals:
+                    try:
+                        if match_text and match_text in (g.text or "").lower():
+                            g.status = new_status
+                            break
+                    except Exception:
+                        # Legacy dict fallback
+                        if isinstance(g, dict):
+                            txt = str(g.get("text", "")).lower()
+                            if match_text and match_text in txt:
+                                g["status"] = new_status
+                                break
+                        continue
+            elif "update_relationship" in desired and isinstance(desired["update_relationship"], dict):
+                data = desired["update_relationship"]
+                target_id = str(data.get("target_id", ""))
+                new_status = str(data.get("new_status", ""))
+                if target_id:
+                    npc.relationships[target_id] = new_status
+            # All other mutations (hp, inventory, slots, movement) are forbidden by design.
+        elif event.event_type == "reflect":
+            # Deterministic handler for ReflectTool outcomes.
+            actor_id = event.actor_id
+            npc = self.npcs.get(actor_id)
+            if not npc:
+                return
+            outputs = (event.payload or {}).get("outputs") or {}
+
+            def _mk_mem(d: Dict[str, Any]) -> Memory:
+                return Memory(
+                    text=str(d.get("text", ""))[:1000],
+                    tick=int(event.tick),
+                    priority=str(d.get("priority", "normal")) if d.get("priority") else "normal",
+                    status="active",
+                    source_id=actor_id,
+                    confidence=float(d.get("confidence", 0.8)) if d.get("confidence") is not None else 0.8,
+                    is_secret=bool(d.get("is_secret", False)),
+                    payload=dict(d.get("payload", {})) if isinstance(d.get("payload", dict)) else {},
+                )
+
+            # Add new core memories
+            for d in outputs.get("new_core_memories", []) or []:
+                try:
+                    mem = _mk_mem(d)
+                    npc.core_memories.append(mem)
+                    if len(npc.core_memories) > 50:
+                        npc.core_memories = npc.core_memories[-50:]
+                except Exception:
+                    continue
+
+            # Add new ordinary memories
+            for d in outputs.get("new_memories", []) or []:
+                try:
+                    mem = _mk_mem(d)
+                    npc.memories.append(mem)
+                    if len(npc.memories) > 1000:
+                        for old in npc.memories[:50]:
+                            try:
+                                old.status = "archived"
+                            except Exception:
+                                pass
+                except Exception:
+                    continue
+
+            # Mark archive/consolidate by substring matches
+            archive_matches = outputs.get("archive_matches", []) or []
+            consolidate_matches = outputs.get("consolidate_matches", []) or []
+
+            def _match_and_mark(mem_list):
+                for m in mem_list:
+                    try:
+                        text = (m.text or "").lower()
+                    except Exception:
+                        if isinstance(m, dict):
+                            text = json.dumps(m, ensure_ascii=False).lower()
+                        else:
+                            continue
+                    for token in archive_matches:
+                        if isinstance(token, str) and token.lower() in text:
+                            try:
+                                m.status = "archived"
+                            except Exception:
+                                if isinstance(m, dict):
+                                    m["status"] = "archived"
+                    for token in consolidate_matches:
+                        if isinstance(token, str) and token.lower() in text:
+                            try:
+                                m.status = "consolidated"
+                            except Exception:
+                                if isinstance(m, dict):
+                                    m["status"] = "consolidated"
+
+            _match_and_mark(npc.memories)
+            _match_and_mark(npc.core_memories)
+
+====================================================================================================
+FILE: rpg/__init__.py
+====================================================================================================
+
+"""RPG-related helper modules."""
+
+====================================================================================================
+FILE: rpg/combat_rules.py
+====================================================================================================
+
+import random
+from typing import Dict
+
+from engine.data_models import NPC, ItemBlueprint
+from engine.world_state import WorldState
+
+
+def ability_modifier(score: int) -> int:
+    return (score - 10) // 2
+
+
+_PROFICIENCY_MAP = {
+    "novice": 1,
+    "proficient": 2,
+    "expert": 3,
+    "master": 4,
+}
+
+
+def proficiency_bonus(level: str) -> int:
+    return _PROFICIENCY_MAP.get(level, 0)
+
+
+def roll_dice(spec: str) -> int:
+    num, die = spec.lower().split('d')
+    num = int(num)
+    die = int(die)
+    return sum(random.randint(1, die) for _ in range(num))
+
+
+_DEFAULT_UNARMED = ItemBlueprint(
+    id="unarmed",
+    name="Unarmed",
+    weight=0,
+    damage_dice="1d4",
+    damage_type="bludgeoning",
+    armour_rating=0,
+    skill_tag="unarmed_combat",
+)
+
+
+def get_weapon(world: WorldState, actor: NPC) -> ItemBlueprint:
+    inst_id = actor.slots.get("main_hand")
+    if inst_id and inst_id in world.item_instances:
+        inst = world.get_item_instance(inst_id)
+        bp = world.get_item_blueprint(inst.blueprint_id)
+        return bp
+    return _DEFAULT_UNARMED
+
+
+def compute_ac(world: WorldState, actor: NPC) -> int:
+    ac = 10
+    # armour from equipped items
+    for inst_id in actor.slots.values():
+        if inst_id and inst_id in world.item_instances:
+            inst = world.get_item_instance(inst_id)
+            bp = world.get_item_blueprint(inst.blueprint_id)
+            ac += getattr(bp, "armour_rating", 0)
+    dex = actor.attributes.get("dexterity", 10)
+    ac += ability_modifier(dex)
+    return ac
+
+
+def resolve_attack(world: WorldState, attacker: NPC, target: NPC) -> Dict[str, int]:
+    weapon = get_weapon(world, attacker)
+    # choose ability
+    str_mod = ability_modifier(attacker.attributes.get("strength", 10))
+    dex_mod = ability_modifier(attacker.attributes.get("dexterity", 10))
+    if "finesse" in getattr(weapon, "properties", []):
+        attr_mod = max(str_mod, dex_mod)
+    else:
+        attr_mod = str_mod
+    prof_level = attacker.skills.get(weapon.skill_tag, "")
+    prof_bonus = proficiency_bonus(prof_level)
+    d20 = roll_dice("1d20")
+    to_hit = d20 + attr_mod + prof_bonus
+    target_ac = compute_ac(world, target)
+    hit = to_hit >= target_ac
+    critical = d20 == 20
+    damage = 0
+    if hit:
+        damage = roll_dice(weapon.damage_dice)
+        if critical:
+            damage += roll_dice(weapon.damage_dice)
+        damage += attr_mod
+    return {
+        "hit": hit,
+        "damage": damage,
+        "to_hit": to_hit,
+        "target_ac": target_ac,
+    }

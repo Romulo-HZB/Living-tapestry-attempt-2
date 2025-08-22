@@ -1,0 +1,12 @@
+{
+  "id": "town_square",
+  "description": "A simple town square with a fountain in the middle.",
+  "tags": {
+    "inherent": []
+  },
+  "hex_connections": {
+    "NE": "tavern",
+    "SE": "market_square",
+    "SW": "alley"
+  }
+}

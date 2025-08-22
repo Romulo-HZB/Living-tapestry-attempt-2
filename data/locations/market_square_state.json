@@ -1,0 +1,19 @@
+{
+  "id": "market_square",
+  "occupants": [
+    "npc_bard",
+    "npc_blacksmith"
+  ],
+  "items": [
+    "item_rusty_sword_1",
+    "item_apple_1"
+  ],
+  "sublocations": [],
+  "transient_effects": [],
+  "connections_state": {
+    "town_square": {
+      "status": "closed",
+      "direction": "NW"
+    }
+  }
+}

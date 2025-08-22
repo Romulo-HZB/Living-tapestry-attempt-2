@@ -1,0 +1,25 @@
+{
+  "id": "town_square",
+  "occupants": [
+    "npc_sample",
+    "npc_enemy",
+    "npc_guard"
+  ],
+  "items": [],
+  "sublocations": [],
+  "transient_effects": [],
+  "connections_state": {
+    "market_square": {
+      "status": "closed",
+      "direction": "SE"
+    },
+    "alley": {
+      "status": "open",
+      "direction": "SW"
+    },
+    "tavern": {
+      "status": "open",
+      "direction": "NE"
+    }
+  }
+}

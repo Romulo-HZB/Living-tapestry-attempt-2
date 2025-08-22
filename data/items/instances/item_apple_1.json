@@ -1,0 +1,9 @@
+{
+  "id": "item_apple_1",
+  "blueprint_id": "apple",
+  "current_location": null,
+  "owner_id": null,
+  "item_state": {},
+  "inventory": [],
+  "tags": {"inherent": [], "dynamic": []}
+}

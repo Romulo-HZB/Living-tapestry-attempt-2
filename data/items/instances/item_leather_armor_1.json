@@ -1,0 +1,9 @@
+{
+  "id": "item_leather_armor_1",
+  "blueprint_id": "leather_armor",
+  "current_location": null,
+  "owner_id": "npc_enemy",
+  "item_state": {},
+  "inventory": [],
+  "tags": {"inherent": [], "dynamic": []}
+}
