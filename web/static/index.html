@@ -95,6 +95,14 @@
     }
     .btn{padding:10px 14px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.05); color:var(--muted)}
     .hint{padding:6px 12px; color:var(--muted); font-size:12px}
+
+    /* Designer layout */
+    #designerArea{margin-top:14px; height:400px; display:flex; gap:14px}
+    #designerSidebar{width:200px; overflow:auto}
+    #designerSidebar ul{list-style:none; margin:0; padding:8px}
+    #designerSidebar li{padding:4px 0; display:flex; justify-content:space-between; align-items:center}
+    #designerCanvas{flex:1; position:relative; background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden}
+    .dnode{position:absolute; transform:translate(-50%,-50%); cursor:move; text-align:center; color:var(--text); font-size:12px}
   </style>
 </head>
 <body>
@@ -162,8 +170,23 @@
           <input class="input" placeholder="What do you want to do?" disabled />
           <button class="btn" disabled>Send</button>
         </div>
-      </section>
+  </section>
     </div>
+  </div>
+
+  <!-- Designer area -->
+  <div class="shell" id="designerArea">
+    <section class="card" id="designerSidebar">
+      <div class="card-header">Locations</div>
+      <ul id="locationList"></ul>
+    </section>
+    <section class="card" style="flex:1; position:relative;">
+      <div class="card-header">
+        <span>Map Designer</span>
+        <span class="hint">Click to add • Drag between hexes to connect (Alt=disconnect)</span>
+      </div>
+      <div id="designerCanvas"></div>
+    </section>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
@@ -439,6 +462,81 @@
       applyTf();
       window.addEventListener('resize', ()=> drawGrid());
     })();
+  </script>
+  <script src="designer.js"></script>
+  <script>
+    const locListEl = document.getElementById('locationList');
+    const designerCanvas = document.getElementById('designerCanvas');
+    let designerLocations = {};
+
+    function renderDesigner(){
+      locListEl.innerHTML = '';
+      designerCanvas.innerHTML = '';
+      for(const id in designerLocations){
+        const loc = designerLocations[id];
+        // sidebar item with delete
+        const li = document.createElement('li');
+        li.textContent = loc.name || id;
+        const del = document.createElement('button');
+        del.textContent = '✖';
+        del.addEventListener('click', async (e)=>{
+          e.stopPropagation();
+          await deleteLocation(id);
+          await refreshDesigner();
+        });
+        li.appendChild(del);
+        locListEl.appendChild(li);
+
+        // canvas hex
+        const c = centers[id];
+        const node = document.createElement('div');
+        node.className = 'dnode';
+        node.style.left = `${c.x}px`;
+        node.style.top = `${c.y}px`;
+        node.draggable = true;
+        node.addEventListener('dragstart', e=>{
+          e.dataTransfer.setData('text/plain', id);
+        });
+        node.addEventListener('dragover', e=>e.preventDefault());
+        node.addEventListener('drop', async e=>{
+          e.preventDefault();
+          const src = e.dataTransfer.getData('text/plain');
+          if(src && src !== id){
+            if(e.altKey){
+              await disconnectLocations(src, id);
+            }else{
+              await connectLocations(src, id);
+            }
+            await refreshDesigner();
+          }
+        });
+        const hex = document.createElement('div');
+        hex.className = 'hex';
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = loc.name || id;
+        hex.appendChild(label);
+        node.appendChild(hex);
+        designerCanvas.appendChild(node);
+      }
+    }
+
+    async function refreshDesigner(){
+      await pullLocations();
+      designerLocations = locations;
+      renderDesigner();
+    }
+
+    designerCanvas.addEventListener('click', async e=>{
+      if(e.target !== designerCanvas) return;
+      const id = prompt('New location id');
+      if(id){
+        await createLocation(id);
+        await refreshDesigner();
+      }
+    });
+
+    refreshDesigner();
   </script>
 </body>
 </html>
