@@ -22,7 +22,6 @@ class LLMClient:
                 "endpoint": "http://localhost:11434/v1/chat/completions",
                 "model": "gpt-4o-mini",
                 "max_output_tokens": 256,
-                "api_key": "",
                 "extra_headers": {},
             }
         except Exception as e:
@@ -31,7 +30,6 @@ class LLMClient:
                 "endpoint": "http://localhost:11434/v1/chat/completions",
                 "model": "gpt-4o-mini",
                 "max_output_tokens": 256,
-                "api_key": "",
                 "extra_headers": {},
             }
         self.endpoint = cfg.get("endpoint")
