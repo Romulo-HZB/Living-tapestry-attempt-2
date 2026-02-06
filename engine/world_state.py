@@ -10,11 +10,17 @@ from .data_models import (
     ItemInstance,
 )
 from .events import Event
-from .data_models import Memory, Goal
+from .data_models import Memory, Goal, PerceptionEvent
 
 
 # Shared hex-direction inverse map (DRY for hydration and event handling)
 HEX_DIR_INVERSE = {
+    "E": "W",
+    "W": "E",
+    "NE": "SW",
+    "SW": "NE",
+    "NW": "SE",
+    "SE": "NW",
     "north": "south",
     "south": "north",
     "north_east": "south_west",
@@ -71,6 +77,56 @@ class WorldState:
                 data["last_meal_tick"] = 0
             if "hunger_stage" not in data:
                 data["hunger_stage"] = "sated"
+            # Coerce memory/goal/perception dicts into dataclasses when loading from JSON.
+            def _to_memory(raw):
+                if isinstance(raw, Memory):
+                    return raw
+                if isinstance(raw, dict):
+                    return Memory(
+                        text=str(raw.get("text", "")),
+                        tick=int(raw.get("tick", 0) or 0),
+                        priority=str(raw.get("priority", "normal")),
+                        status=str(raw.get("status", "active")),
+                        source_id=raw.get("source_id"),
+                        confidence=float(raw.get("confidence", 1.0)),
+                        is_secret=bool(raw.get("is_secret", False)),
+                        payload=dict(raw.get("payload", {})) if isinstance(raw.get("payload", {}), dict) else {},
+                    )
+                return Memory(text=str(raw))
+            def _to_goal(raw):
+                if isinstance(raw, Goal):
+                    return raw
+                if isinstance(raw, dict):
+                    return Goal(
+                        text=str(raw.get("text", "")),
+                        type=str(raw.get("type", "note")),
+                        priority=str(raw.get("priority", "normal")),
+                        status=str(raw.get("status", "active")),
+                        payload=dict(raw.get("payload", {})) if isinstance(raw.get("payload", {}), dict) else {},
+                        expiry_tick=int(raw.get("expiry_tick")) if raw.get("expiry_tick") is not None else None,
+                    )
+                return Goal(text=str(raw))
+            def _to_perception(raw):
+                if isinstance(raw, PerceptionEvent):
+                    return raw
+                if isinstance(raw, dict):
+                    return PerceptionEvent(
+                        event_type=str(raw.get("event_type", raw.get("type", "generic"))),
+                        tick=int(raw.get("tick", 0) or 0),
+                        actor_id=raw.get("actor_id"),
+                        target_ids=list(raw.get("target_ids", []) or []),
+                        location_id=raw.get("location_id"),
+                        payload=dict(raw.get("payload", {})) if isinstance(raw.get("payload", {}), dict) else {},
+                    )
+                return PerceptionEvent(event_type="generic", payload={"raw": raw})
+            if isinstance(data.get("memories"), list):
+                data["memories"] = [_to_memory(m) for m in data["memories"]]
+            if isinstance(data.get("core_memories"), list):
+                data["core_memories"] = [_to_memory(m) for m in data["core_memories"]]
+            if isinstance(data.get("goals"), list):
+                data["goals"] = [_to_goal(g) for g in data["goals"]]
+            if isinstance(data.get("short_term_memory"), list):
+                data["short_term_memory"] = [_to_perception(p) for p in data["short_term_memory"]]
             npc = NPC(**data)
             self.npcs[npc.id] = npc
 
@@ -305,17 +361,44 @@ class WorldState:
                             inv = HEX_DIR_INVERSE.get(fdir)
                             if inv:
                                 to["direction"] = inv
+                    # If only the reverse has a direction, infer the forward
+                    if "direction" not in fr and "direction" in to:
+                        tdir = to.get("direction")
+                        if isinstance(tdir, str):
+                            inv = HEX_DIR_INVERSE.get(tdir)
+                            if inv:
+                                fr["direction"] = inv
                 except Exception:
                     pass
         elif event.event_type == "close_connection":
             actor_loc = self.find_npc_location(event.actor_id)
             target = event.target_ids[0]
             if actor_loc:
-                self.locations_state[actor_loc].connections_state.setdefault(target, {})["status"] = "closed"
-                self.locations_state[target].connections_state.setdefault(actor_loc, {})["status"] = "closed"
+                fr = self.locations_state[actor_loc].connections_state.setdefault(target, {})
+                to = self.locations_state[target].connections_state.setdefault(actor_loc, {})
+                fr["status"] = "closed"
+                to["status"] = "closed"
+                # Preserve or infer directions to avoid drift
+                try:
+                    if "direction" not in fr and "direction" in to:
+                        tdir = to.get("direction")
+                        if isinstance(tdir, str):
+                            inv = HEX_DIR_INVERSE.get(tdir)
+                            if inv:
+                                fr["direction"] = inv
+                    if "direction" not in to and "direction" in fr:
+                        fdir = fr.get("direction")
+                        if isinstance(fdir, str):
+                            inv = HEX_DIR_INVERSE.get(fdir)
+                            if inv:
+                                to["direction"] = inv
+                except Exception:
+                    pass
         elif event.event_type == "npc_died":
             npc = self.npcs.get(event.actor_id)
             if not npc:
+                return
+            if "dead" in npc.tags.get("dynamic", []):
                 return
             loc_id = self.find_npc_location(npc.id)
             if loc_id and npc.id in self.locations_state[loc_id].occupants:

@@ -129,7 +129,7 @@ class Simulator:
                 convo_snapshot = None
 
             ctx = {
-                "game_tick": getattr(world, "game_tick", 0),
+                "game_tick": self.game_tick,
                 "actor": persona,
                 "location": {
                     "id": loc_id,
@@ -176,7 +176,7 @@ class Simulator:
                 try:
                     tool_name = action.get("tool")
                     if ctx.get("conversation") and ctx["conversation"].get("current_speaker") != nid:
-                        if tool_name in {"talk"}:
+                        if tool_name in {"talk", "talk_loud", "scream", "interject"}:
                             # Convert blocked speech into a visible wait action so a bubble appears.
                             action = {"tool": "wait", "params": {"ticks": 1}}
                 except Exception:
@@ -398,7 +398,7 @@ class Simulator:
             pass
 
         ctx = {
-            "game_tick": getattr(self.world, "game_tick", 0),
+            "game_tick": self.game_tick,
             "actor": persona,
             "location": {
                 "id": current_loc,
@@ -1495,7 +1495,7 @@ class Simulator:
 
     def record_perception(self, event: Event):
         """Add a simplified perception entry to actors in the same or adjacent locations per rules."""
-        if event.event_type in {"describe_location", "wait"}:
+        if event.event_type in {"describe_location"}:
             return
 
         # Determine the primary location where the event is perceived

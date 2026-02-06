@@ -318,11 +318,10 @@ def initialize_game():
     simulator = Simulator(world, narrator=narrator, player_id=player_id)
     
     # Initialize LLM client
-    try:
-        llm_client = LLMClient(Path("config/llm.json"))
-    except Exception as e:
-        print(f"Warning: Could not initialize LLM client: {e}")
-        llm_client = None
+    llm_client = LLMClient(Path("config/llm.json"))
+    if isinstance(getattr(llm_client, "endpoint", None), str) and "openrouter.ai" in llm_client.endpoint:
+        if not getattr(llm_client, "api_key", None):
+            raise RuntimeError("OpenRouter api_key is required in config/llm.json to play.")
     
     # Attach shared LLM client to simulator for NPC planning
     try:
@@ -565,7 +564,9 @@ def parse_command():
     try:
         # Get current state for context
         state_response = get_state()
-        state_data = state_response.json if hasattr(state_response, 'json') else state_response.get_json()
+        state_data = state_response.get_json(silent=True) if hasattr(state_response, "get_json") else None
+        if not state_data:
+            state_data = {}
         
         # Build additional context for the LLM
         player = state_data.get("player", {})

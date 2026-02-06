@@ -63,6 +63,7 @@ class NPC:
 class LocationStatic:
     id: str
     description: str
+    name: Optional[str] = None
     tags: Dict[str, List[str]] = field(default_factory=lambda: {"inherent": []})
     hex_connections: Dict[str, str] = field(default_factory=dict)
 

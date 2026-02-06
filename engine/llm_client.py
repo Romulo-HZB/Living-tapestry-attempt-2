@@ -19,16 +19,16 @@ class LLMClient:
             # Provide a clearer message and safe defaults for offline/dev runs
             print(f"[LLMClient] Config file not found at '{config_path}'. Using safe defaults.")
             cfg = {
-                "endpoint": "http://localhost:11434/v1/chat/completions",
-                "model": "gpt-4o-mini",
+                "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+                "model": "openai/gpt-4o-mini",
                 "max_output_tokens": 256,
                 "extra_headers": {},
             }
         except Exception as e:
             print(f"[LLMClient] Failed to load config '{config_path}': {e}. Using safe defaults.")
             cfg = {
-                "endpoint": "http://localhost:11434/v1/chat/completions",
-                "model": "gpt-4o-mini",
+                "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+                "model": "openai/gpt-4o-mini",
                 "max_output_tokens": 256,
                 "extra_headers": {},
             }
@@ -43,6 +43,9 @@ class LLMClient:
         self.debug = bool(cfg.get("debug", False))
 
     def chat(self, messages: List[Dict[str, str]]) -> str:
+        if isinstance(self.endpoint, str) and "openrouter.ai" in self.endpoint:
+            if not self.api_key:
+                raise RuntimeError("OpenRouter requires an api_key in config/llm.json.")
         # Request the model to ONLY return a JSON object; no prose.
         # Add an assistant-side system instruction to enforce JSON output.
         sys_guard = {
