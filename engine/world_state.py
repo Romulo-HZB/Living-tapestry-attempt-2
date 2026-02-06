@@ -65,6 +65,8 @@ class WorldState:
                 inst = self.item_instances.get(item_id)
                 if inst and inst.current_location is None:
                     inst.current_location = loc_id
+        # Reconcile item ownership/location references across NPCs and locations.
+        self._reconcile_item_references()
 
     def _load_npcs(self):
         npcs_dir = self.data_dir / "npcs"
@@ -142,6 +144,10 @@ class WorldState:
                 data = json.load(f)
             loc = LocationState(**data)
             self.locations_state[loc.id] = loc
+        # Ensure every static location has a matching dynamic state entry.
+        for loc_id in self.locations_static.keys():
+            if loc_id not in self.locations_state:
+                self.locations_state[loc_id] = LocationState(id=loc_id)
 
     def _hydrate_connection_directions(self):
         """
@@ -192,6 +198,52 @@ class WorldState:
                     data = json.load(f)
                 instance = ItemInstance(**data)
                 self.item_instances[instance.id] = instance
+
+    def _reconcile_item_references(self):
+        """Ensure item instances, NPC inventories/slots, and location items are consistent."""
+        # Ensure equipped items are marked as owned and not left in locations/inventories.
+        for npc in self.npcs.values():
+            try:
+                slots = getattr(npc, "slots", {}) or {}
+            except Exception:
+                slots = {}
+            for item_id in list(slots.values()):
+                if not item_id:
+                    continue
+                inst = self.item_instances.get(item_id)
+                if inst:
+                    inst.owner_id = npc.id
+                    inst.current_location = None
+                # Equipped items should not remain in inventory.
+                try:
+                    if item_id in npc.inventory:
+                        npc.inventory.remove(item_id)
+                except Exception:
+                    pass
+        # Ensure inventory ownership is reflected on instances.
+        for npc in self.npcs.values():
+            for item_id in list(getattr(npc, "inventory", []) or []):
+                inst = self.item_instances.get(item_id)
+                if inst:
+                    inst.owner_id = npc.id
+                    inst.current_location = None
+        # Ensure item instances placed in locations appear in LocationState.items.
+        for item_id, inst in self.item_instances.items():
+            if inst.owner_id:
+                # Owned items should not be listed in location items.
+                for loc in self.locations_state.values():
+                    try:
+                        if item_id in loc.items:
+                            loc.items.remove(item_id)
+                    except Exception:
+                        pass
+                continue
+            if inst.current_location:
+                loc_state = self.locations_state.setdefault(
+                    inst.current_location, LocationState(id=inst.current_location)
+                )
+                if item_id not in loc_state.items:
+                    loc_state.items.append(item_id)
 
     def get_npc(self, npc_id: str) -> NPC:
         return self.npcs[npc_id]
