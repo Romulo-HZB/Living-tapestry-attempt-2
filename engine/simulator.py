@@ -431,11 +431,14 @@ class Simulator:
             hunger_events = self.world.update_hunger(self.game_tick)
             self.event_queue.extend(hunger_events)
 
-        # Drain only events whose tick <= current
-        ready_events = [e for e in self.event_queue if e.tick <= self.game_tick]
-        self.event_queue = [e for e in self.event_queue if e.tick > self.game_tick]
-        for event in ready_events:
-            self.handle_event(event)
+        # Drain only events whose tick <= current, including events produced during handling.
+        while True:
+            ready_events = [e for e in self.event_queue if e.tick <= self.game_tick]
+            if not ready_events:
+                break
+            self.event_queue = [e for e in self.event_queue if e.tick > self.game_tick]
+            for event in ready_events:
+                self.handle_event(event)
         # After all events for this tick have been handled and actor bubbles recorded, update the renderer once.
         self._renderer_push_state()
 
