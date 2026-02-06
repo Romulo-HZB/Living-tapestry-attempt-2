@@ -34,6 +34,7 @@ def make_perception_from_event(origin: Event, location_id: Optional[str] = None)
         event_type=origin.event_type,
         tick=origin.tick,
         actor_id=origin.actor_id,
+        target_ids=list(origin.target_ids),
         location_id=location_id,
         payload=origin.payload.copy()
     )

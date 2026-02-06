@@ -63,7 +63,11 @@ def render_player_hud(sim: Simulator, world: WorldState, actor_id: str) -> None:
 
     # Player summary
     hp = getattr(player, "hp", None)
-    max_hp = getattr(player, "attributes", {}).get("constitution", hp) if hasattr(player, "attributes") else hp
+    if hasattr(player, "attributes"):
+        max_hp = getattr(player, "attributes", {}).get("constitution", hp)
+        max_hp = max(1, max_hp * 2) if isinstance(max_hp, int) else hp
+    else:
+        max_hp = hp
     hunger = getattr(player, "hunger_stage", None)
 
     # Equipped summary (simple)
@@ -202,9 +206,6 @@ def read_input_with_ui(sim, prompt: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    # Always use LLM intent detection; keep a hidden flag for debugging if needed
-    # Always use LLM intent detection; keep a hidden flag for debugging if needed
-    parser.add_argument("--no-llm", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     world = WorldState(Path("data"))
@@ -239,6 +240,9 @@ def main():
     sim.register_tool(RestTool())
     # Always initialize LLM for intent detection
     llm = LLMClient(Path("config/llm.json"))
+    if isinstance(getattr(llm, "endpoint", None), str) and "openrouter.ai" in llm.endpoint:
+        if not getattr(llm, "api_key", None):
+            raise RuntimeError("OpenRouter api_key is required in config/llm.json to play.")
     try:
         # Ensure NPC planner shares this same client/config
         sim.llm = llm

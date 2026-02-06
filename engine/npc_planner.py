@@ -15,7 +15,6 @@ PLANNER_SYSTEM_PROMPT = (
     "- If in a conversation and not current speaker, prefer null; consider interject ONLY for brief, meaningful asides.\n"
     "- Working memory is provided; consider goals, core memories, and recent perceptions when deciding.\n"
     "- When idle: prefer varied low-impact actions like talk with short emotes (e.g., 'nods.', 'hums.'), or wait; avoid repeating the same action consecutively.\n"
-    "- Avoid selecting 'look' more than once every 5 turns; use it sparingly.\n"
     "- Use 'move' only to valid open neighbors.\n"
     "- Use 'attack' only if co-located and context justifies.\n"
     "- For durations like wait/rest without a number, use ticks=1.\n"
@@ -30,7 +29,7 @@ PLANNER_SYSTEM_PROMPT = (
     "Only use talk/talk_loud when speech itself advances the goal. When speaking to someone present, include target_id. If the relevant person is elsewhere, move instead.\n"
     "\n"
     "Repetition hint:\n"
-    "You receive repetition_hint = {last_tool_by_actor, avoid_repeat_within, look_cooldown}. Do not pick last_tool_by_actor again within avoid_repeat_within turns unless necessary. Avoid 'look' within look_cooldown. If you previously indicated you would investigate, prefer 'move' next.\n"
+    "You receive repetition_hint = {last_tool_by_actor, avoid_repeat_within, look_cooldown}. Do not pick last_tool_by_actor again within avoid_repeat_within turns unless necessary. If you previously indicated you would investigate, prefer 'move' next.\n"
     "\n"
     "Hidden reasoning:\n"
     "Before deciding, write brief hidden reasoning inside <think>...</think>. Then output ONLY one JSON object with the command.\n"
@@ -357,7 +356,7 @@ class NPCPlanner:
             "neighbor_names": neighbor_names,
             "tool_schemas": tool_schemas,
             "tool_examples": tool_examples,
-            "input": "Decide the next action. Respect repetition_hint.last_tool_by_actor and avoid repeating the same tool within repetition_hint.avoid_repeat_within turns. Do not choose look if last use was within look_cooldown turns."
+            "input": "Decide the next action. Respect repetition_hint.last_tool_by_actor and avoid repeating the same tool within repetition_hint.avoid_repeat_within turns."
         }
         messages = [
             {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
@@ -431,7 +430,7 @@ class NPCPlanner:
         if tool is None or (isinstance(tool, str) and tool.strip().lower() in {"null", "none"}):
             return None
         valid_tools = {
-            "move","talk","talk_loud","scream","look","grab","drop","attack",
+            "move","talk","talk_loud","scream","grab","drop","attack",
             "inventory","stats","equip","unequip","analyze","eat","give",
             "open","close","toggle_starvation","wait","rest","interject","leave_conversation",
         }
